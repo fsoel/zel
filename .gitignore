@@ -22,6 +22,12 @@
 *.la
 *.lo
 
+# Build directories
+build/
+
+# Tooling artefacts
+compile_commands.json
+
 # Shared objects (inc. Windows DLLs)
 *.dll
 *.so
@@ -53,3 +59,8 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+tools/**
+!tools/
+!tools/png2zel.py
+!tools/requirements.txt
