@@ -7,18 +7,48 @@
 #include "fixtures/simple_zel_file.h"
 #include "zel/zel.h"
 
+static void write_zone_chunks(uint8_t *dst, size_t *offset, const uint8_t *pixels,
+                              uint16_t width, uint16_t height, uint16_t zoneWidth,
+                              uint16_t zoneHeight, uint8_t *scratch) {
+    const uint32_t zonesPerRow = width / zoneWidth;
+    const uint32_t zonesPerCol = height / zoneHeight;
+    const uint32_t zoneCount = zonesPerRow * zonesPerCol;
+    const size_t zoneBytes = (size_t)zoneWidth * zoneHeight;
 
-/* Simple helper function: builds a simple ZEL file in memory:
-   - 4x2 pixels
-   - 1 frame
-   - global palette with 2 entries (RGB565)
-   - no compression
-   Pixel pattern: 0,1,0,1 / 1,0,1,0
+    for (uint32_t zoneIndex = 0; zoneIndex < zoneCount; ++zoneIndex) {
+        const uint32_t zoneX = (zoneIndex % zonesPerRow) * zoneWidth;
+        const uint32_t zoneY = (zoneIndex / zonesPerRow) * zoneHeight;
+
+        for (uint16_t row = 0; row < zoneHeight; ++row) {
+            const uint8_t *srcRow = pixels + (size_t)(zoneY + row) * width + zoneX;
+            memcpy(scratch + (size_t)row * zoneWidth, srcRow, zoneWidth);
+        }
+
+        uint32_t chunkSize = (uint32_t)zoneBytes;
+        memcpy(dst + *offset, &chunkSize, sizeof(chunkSize));
+        *offset += sizeof(chunkSize);
+        memcpy(dst + *offset, scratch, zoneBytes);
+        *offset += zoneBytes;
+    }
+}
+
+
+/* Simple helper function: builds a simple ZEL file in memory with configurable zone size:
+    - 4x2 pixels
+    - 1 frame
+    - global palette with 2 entries (RGB565)
+    - no compression
+    Pixel pattern: 0,1,0,1 / 1,0,1,0
 */
-static uint8_t *buildSimpleZelSingleFrame(size_t *outSize) {
-    enum { WIDTH = 4, HEIGHT = 2, PIXEL_COUNT = WIDTH * HEIGHT };
-    const uint16_t width = WIDTH;
-    const uint16_t height = HEIGHT;
+static uint8_t *buildSimpleZelSingleFrameWithZones(uint16_t zoneWidth, uint16_t zoneHeight,
+                                                                    size_t *outSize) {
+     enum { WIDTH = 4, HEIGHT = 2, PIXEL_COUNT = WIDTH * HEIGHT };
+     const uint16_t width = WIDTH;
+     const uint16_t height = HEIGHT;
+
+     assert(zoneWidth != 0 && zoneHeight != 0);
+     assert(width % zoneWidth == 0);
+     assert(height % zoneHeight == 0);
 
     ZELFileHeader fh;
     memset(&fh, 0, sizeof(fh));
@@ -27,8 +57,8 @@ static uint8_t *buildSimpleZelSingleFrame(size_t *outSize) {
     fh.headerSize = sizeof(ZELFileHeader);
     fh.width = width;
     fh.height = height;
-    fh.tileWidth = width;
-    fh.tileHeight = height;
+    fh.zoneWidth = zoneWidth;
+    fh.zoneHeight = zoneHeight;
     fh.colorFormat = ZEL_COLOR_FORMAT_INDEXED8;
     fh.flags.hasGlobalPalette = 1;
     fh.flags.hasFrameLocalPalettes = 0;
@@ -56,8 +86,12 @@ static uint8_t *buildSimpleZelSingleFrame(size_t *outSize) {
     frh.localPaletteEntryCount = 0;
 
     uint8_t pixels[PIXEL_COUNT] = {0, 1, 0, 1, 1, 0, 1, 0};
+    const uint32_t zoneCount = (width / fh.zoneWidth) * (height / fh.zoneHeight);
+    frh.zoneCount = (uint16_t)zoneCount;
 
-    size_t frameBlockSize = sizeof(ZELFrameHeader) + sizeof(pixels);
+    const size_t zoneBytes = (size_t)fh.zoneWidth * fh.zoneHeight;
+    const size_t frameBlockSize = sizeof(ZELFrameHeader) +
+                                  zoneCount * (sizeof(uint32_t) + zoneBytes);
 
     ZELFrameIndexEntry fie;
     memset(&fie, 0, sizeof(fie));
@@ -66,7 +100,7 @@ static uint8_t *buildSimpleZelSingleFrame(size_t *outSize) {
     fie.frameSize = (uint32_t)frameBlockSize;
 
     size_t size = sizeof(ZELFileHeader) + sizeof(ZELPaletteHeader) + sizeof(palette) +
-                  sizeof(ZELFrameIndexEntry) + sizeof(ZELFrameHeader) + sizeof(pixels);
+                  sizeof(ZELFrameIndexEntry) + frameBlockSize;
 
     uint8_t *buf = (uint8_t *)malloc(size);
     assert(buf);
@@ -89,8 +123,9 @@ static uint8_t *buildSimpleZelSingleFrame(size_t *outSize) {
     memcpy(buf + off, &frh, sizeof(frh));
     off += sizeof(frh);
 
-    memcpy(buf + off, pixels, sizeof(pixels));
-    off += sizeof(pixels);
+    uint8_t zoneScratch[PIXEL_COUNT];
+    write_zone_chunks(buf, &off, pixels, width, height, fh.zoneWidth, fh.zoneHeight,
+                      zoneScratch);
 
     fie.frameOffset = (uint32_t)frameOffset;
 
@@ -103,12 +138,21 @@ static uint8_t *buildSimpleZelSingleFrame(size_t *outSize) {
     return buf;
 }
 
+static uint8_t *buildSimpleZelSingleFrame(size_t *outSize) {
+    return buildSimpleZelSingleFrameWithZones(4, 2, outSize);
+}
+
+static uint8_t *buildSimpleZelSingleFrameMultiZone(size_t *outSize) {
+    return buildSimpleZelSingleFrameWithZones(2, 1, outSize);
+}
+
 /* Builds a simple ZEL file in memory with:
-   - 2x1 pixels
-   - 3 frames
-   - global palette with 2 entries (RGB565)
-   - no compression
-   Pixel pattern: 0,1
+    - 2x1 pixels
+    - 3 frames
+    - global palette with 2 entries (RGB565)
+    - no compression
+    - single zone per frame
+    Pixel pattern: 0,1
 */
 static uint8_t *buildSimpleZelThreeFrames(size_t *outSize) {
     enum { WIDTH = 2, HEIGHT = 1, PIXEL_COUNT = WIDTH * HEIGHT };
@@ -122,8 +166,8 @@ static uint8_t *buildSimpleZelThreeFrames(size_t *outSize) {
     fh.headerSize = sizeof(ZELFileHeader);
     fh.width = width;
     fh.height = height;
-    fh.tileWidth = width;
-    fh.tileHeight = height;
+    fh.zoneWidth = width;
+    fh.zoneHeight = height;
     fh.colorFormat = ZEL_COLOR_FORMAT_INDEXED8;
     fh.flags.hasGlobalPalette = 1;
     fh.flags.hasFrameLocalPalettes = 0;
@@ -159,8 +203,12 @@ static uint8_t *buildSimpleZelThreeFrames(size_t *outSize) {
     frh.localPaletteEntryCount = 0;
 
     uint8_t pixels[PIXEL_COUNT] = {0, 1};
+    const uint32_t zoneCount = (width / fh.zoneWidth) * (height / fh.zoneHeight);
+    frh.zoneCount = (uint16_t)zoneCount;
 
-    size_t oneFrameBlockSize = sizeof(ZELFrameHeader) + sizeof(pixels);
+    const size_t zoneBytes = (size_t)fh.zoneWidth * fh.zoneHeight;
+    size_t oneFrameBlockSize = sizeof(ZELFrameHeader) +
+                               zoneCount * (sizeof(uint32_t) + zoneBytes);
 
     size_t size = sizeof(ZELFileHeader) + sizeof(ZELPaletteHeader) + sizeof(palette) + sizeof(fie) +
                   3 * oneFrameBlockSize;
@@ -182,23 +230,25 @@ static uint8_t *buildSimpleZelThreeFrames(size_t *outSize) {
     size_t frameIndexTableOffset = off;
     off += sizeof(fie);
 
+    uint8_t zoneScratch[PIXEL_COUNT];
+
     size_t frame0Offset = off;
     memcpy(buf + off, &frh, sizeof(frh));
     off += sizeof(frh);
-    memcpy(buf + off, pixels, sizeof(pixels));
-    off += sizeof(pixels);
+    write_zone_chunks(buf, &off, pixels, width, height, fh.zoneWidth, fh.zoneHeight,
+                      zoneScratch);
 
     size_t frame1Offset = off;
     memcpy(buf + off, &frh, sizeof(frh));
     off += sizeof(frh);
-    memcpy(buf + off, pixels, sizeof(pixels));
-    off += sizeof(pixels);
+    write_zone_chunks(buf, &off, pixels, width, height, fh.zoneWidth, fh.zoneHeight,
+                      zoneScratch);
 
     size_t frame2Offset = off;
     memcpy(buf + off, &frh, sizeof(frh));
     off += sizeof(frh);
-    memcpy(buf + off, pixels, sizeof(pixels));
-    off += sizeof(pixels);
+    write_zone_chunks(buf, &off, pixels, width, height, fh.zoneWidth, fh.zoneHeight,
+                      zoneScratch);
 
     fie[0].frameOffset = (uint32_t)frame0Offset;
     fie[1].frameOffset = (uint32_t)frame1Offset;
@@ -296,6 +346,40 @@ static void test_decode_rgb565(void) {
     assert(buf[5] == 0x0000);
     assert(buf[6] == 0xFFFF);
     assert(buf[7] == 0x0000);
+
+    zelClose(ctx);
+    free(data);
+}
+
+static void test_zone_decoders(void) {
+    size_t size = 0;
+    uint8_t *data = buildSimpleZelSingleFrameMultiZone(&size);
+
+    ZELResult res;
+    ZELContext *ctx = zelOpenMemory(data, size, &res);
+    assert(ctx && res == ZEL_OK);
+
+    static const uint8_t expectedIndices[8] = {0, 1, 0, 1, 1, 0, 1, 0};
+    static const uint16_t expectedRgb[8] = {0x0000, 0xFFFF, 0x0000, 0xFFFF,
+                                            0xFFFF, 0x0000, 0xFFFF, 0x0000};
+
+    uint8_t indices[8];
+    memset(indices, 0xCC, sizeof(indices));
+    for (uint32_t zone = 0; zone < 4; ++zone) {
+        res = zelDecodeFrameIndex8Zone(ctx, 0, zone, indices, 4);
+        assert(res == ZEL_OK);
+    }
+    assert(memcmp(indices, expectedIndices, sizeof(expectedIndices)) == 0);
+
+    uint16_t rgb[8];
+    memset(rgb, 0x00, sizeof(rgb));
+    for (uint32_t zone = 0; zone < 4; ++zone) {
+        res = zelDecodeFrameRgb565Zone(ctx, 0, zone, rgb, 4);
+        assert(res == ZEL_OK);
+    }
+    for (size_t i = 0; i < 8; ++i) {
+        assert(rgb[i] == expectedRgb[i]);
+    }
 
     zelClose(ctx);
     free(data);
@@ -471,6 +555,7 @@ int main(void) {
     test_open_and_basic_getters();
     test_palette_and_decode_index8();
     test_decode_rgb565();
+    test_zone_decoders();
     test_timeline_helpers();
     test_open_and_basic_getters_binary();
     test_palette_and_decode_index8_binary();

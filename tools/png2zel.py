@@ -3,6 +3,10 @@ import argparse
 import os
 import struct
 from PIL import Image
+FILE_HEADER_STRUCT = struct.Struct("<4sHHHHHHBBIH10s")
+PALETTE_HEADER_STRUCT = struct.Struct("<BBHB3s")
+FRAME_INDEX_ENTRY_STRUCT = struct.Struct("<IIBH")
+FRAME_HEADER_STRUCT = struct.Struct("<BBBHBHH4s")
 
 try:
     import imagequant
@@ -15,11 +19,6 @@ try:
 except ImportError:
     lz4_block = None
     LZ4BlockError = None
-
-FILE_HEADER_STRUCT = struct.Struct("<4sHHHHBBBBIH10s")
-PALETTE_HEADER_STRUCT = struct.Struct("<BBHB3s")
-FRAME_INDEX_ENTRY_STRUCT = struct.Struct("<IIBH")
-FRAME_HEADER_STRUCT = struct.Struct("<BBBHBHH4s")
 
 HEADER_FLAG_GLOBAL_PALETTE = 0x01
 HEADER_FLAG_FRAME_LOCAL_PALETTE = 0x02
@@ -190,8 +189,8 @@ def png_to_zel(
     input_path,
     output_path,
     default_frame_duration_ms=16,
-    tile_width_override=None,
-    tile_height_override=None,
+    zone_width_override=None,
+    zone_height_override=None,
     compression="lz4",
 ):
     frame_paths = _collect_frame_paths(input_path)
@@ -222,19 +221,32 @@ def png_to_zel(
             "installed. Install it via 'pip install lz4'."
         )
 
-    if tile_width_override is None:
-        tile_width = min(width, 255)
+    if zone_width_override is None:
+        zone_width = min(width, 0xFFFF)
     else:
-        if not (1 <= tile_width_override <= 255):
-            raise ValueError("tile width must be between 1 and 255")
-        tile_width = tile_width_override
+        if not (1 <= zone_width_override <= 0xFFFF):
+            raise ValueError("zone width must be between 1 and 65535")
+        zone_width = zone_width_override
 
-    if tile_height_override is None:
-        tile_height = min(height, 255)
+    if zone_height_override is None:
+        zone_height = min(height, 0xFFFF)
     else:
-        if not (1 <= tile_height_override <= 255):
-            raise ValueError("tile height must be between 1 and 255")
-        tile_height = tile_height_override
+        if not (1 <= zone_height_override <= 0xFFFF):
+            raise ValueError("zone height must be between 1 and 65535")
+        zone_height = zone_height_override
+
+    if width % zone_width != 0:
+        raise ValueError("Image width must be divisible by zone width")
+    if height % zone_height != 0:
+        raise ValueError("Image height must be divisible by zone height")
+
+    zones_per_row = width // zone_width
+    zones_per_col = height // zone_height
+    zone_count = zones_per_row * zones_per_col
+    if zone_count == 0 or zone_count > 0xFFFF:
+        raise ValueError("Zone count must be between 1 and 65535")
+
+    zone_pixel_count = zone_width * zone_height
 
     magic = b"ZEL0"
     version = 1
@@ -252,8 +264,8 @@ def png_to_zel(
         header_size,
         width,
         height,
-        tile_width,
-        tile_height,
+        zone_width,
+        zone_height,
         ZEL_COLOR_FORMAT_INDEXED8,
         header_flags,
         frame_count_value,
@@ -280,24 +292,46 @@ def png_to_zel(
             struct.pack("<H", value) for value in palette_entries
         )
 
-        pixel_payload = info["pixels"]
-        if compression_type == ZEL_COMPRESSION_LZ4:
-            try:
-                pixel_payload = lz4_block.compress(
-                    pixel_payload,
-                    store_size=False,
+        full_indices = info["pixels"]
+        zone_chunks = []
+        compressed_total = 0
+
+        for zone_index in range(zone_count):
+            zone_x = (zone_index % zones_per_row) * zone_width
+            zone_y = (zone_index // zones_per_row) * zone_height
+            zone_raw = bytearray(zone_pixel_count)
+
+            for row in range(zone_height):
+                src_start = (zone_y + row) * width + zone_x
+                src_end = src_start + zone_width
+                dst_start = row * zone_width
+                zone_raw[dst_start:dst_start + zone_width] = (
+                    full_indices[src_start:src_end]
                 )
-            except LZ4BlockError as exc:
-                raise RuntimeError(
-                    f"Failed to compress frame {index} with LZ4"
-                ) from exc
+
+            chunk_payload = bytes(zone_raw)
+            if compression_type == ZEL_COMPRESSION_LZ4:
+                try:
+                    chunk_payload = lz4_block.compress(
+                        chunk_payload,
+                        store_size=False,
+                    )
+                except LZ4BlockError as exc:
+                    raise RuntimeError(
+                        f"Failed to compress frame {index} with LZ4"
+                    ) from exc
+
+            zone_chunks.append(
+                struct.pack("<I", len(chunk_payload)) + chunk_payload
+            )
+            compressed_total += len(chunk_payload)
 
         frame_flags = FRAME_FLAG_KEYFRAME | FRAME_FLAG_HAS_LOCAL_PALETTE
         frame_header = FRAME_HEADER_STRUCT.pack(
             1,
             FRAME_HEADER_STRUCT.size,
             frame_flags,
-            1,
+            zone_count,
             compression_type,
             0,
             palette_count,
@@ -305,12 +339,15 @@ def png_to_zel(
         )
 
         frame_bytes = (
-            frame_header + palette_header + palette_data + pixel_payload
+            frame_header
+            + palette_header
+            + palette_data
+            + b"".join(zone_chunks)
         )
 
         frame_size = len(frame_bytes)
         frame_offset = current_offset
-        info["compressed_size"] = len(pixel_payload)
+        info["compressed_size"] = compressed_total
         info["compression_choice"] = compression_choice
         frame_index_entries.append(
             FRAME_INDEX_ENTRY_STRUCT.pack(
@@ -339,7 +376,7 @@ def png_to_zel(
     )
     print(
         "  Image: "
-        f"{width}x{height}, tile {tile_width}x{tile_height}"
+        f"{width}x{height}, zone {zone_width}x{zone_height}"
     )
     for index, info in enumerate(frame_infos):
         print(
@@ -364,8 +401,8 @@ def zel_to_png(input_path, output_path, frame_index=0):
         header_size,
         width,
         height,
-        tile_width,
-        tile_height,
+        zone_width,
+        zone_height,
         color_format,
         header_flags,
         frame_count,
@@ -432,7 +469,7 @@ def zel_to_png(input_path, output_path, frame_index=0):
         block_type,
         frame_header_size,
         frame_block_flags,
-        tile_count,
+        zone_count,
         compression_type,
         reference_frame_index,
         local_palette_entry_count,
@@ -477,32 +514,75 @@ def zel_to_png(input_path, output_path, frame_index=0):
         raise ValueError("File truncated: pixel payload is missing")
 
     pixel_data_end = frame_offset + frame_size
-    compressed_payload = data[pixel_data_offset:pixel_data_end]
 
-    if compression_type == ZEL_COMPRESSION_NONE:
-        if len(compressed_payload) < pixel_count:
-            raise ValueError("File truncated: pixel data")
-        pixel_data = compressed_payload[:pixel_count]
-    elif compression_type == ZEL_COMPRESSION_LZ4:
-        if lz4_block is None:
+    if zone_width == 0 or zone_height == 0:
+        raise ValueError("Zone dimensions must be non-zero")
+    if width % zone_width != 0 or height % zone_height != 0:
+        raise ValueError("Image dimensions not divisible by zone size")
+
+    zones_per_row = width // zone_width
+    zones_per_col = height // zone_height
+    expected_zone_count = zones_per_row * zones_per_col
+    if expected_zone_count == 0:
+        raise ValueError("Zone grid is empty")
+    if zone_count != expected_zone_count:
+        raise ValueError("Zone count mismatch in frame header")
+
+    zone_pixel_count = zone_width * zone_height
+    zone_offset = pixel_data_offset
+    indices = bytearray(pixel_count)
+
+    for zone_index in range(zone_count):
+        if zone_offset + 4 > pixel_data_end:
+            raise ValueError("File truncated: zone header")
+        (chunk_size,) = struct.unpack_from("<I", data, zone_offset)
+        zone_offset += 4
+        if chunk_size == 0:
+            raise ValueError("Zone chunk size is zero")
+        if zone_offset + chunk_size > pixel_data_end:
+            raise ValueError("File truncated: zone payload")
+        chunk_payload = data[zone_offset:zone_offset + chunk_size]
+        zone_offset += chunk_size
+
+        if compression_type == ZEL_COMPRESSION_NONE:
+            if chunk_size != zone_pixel_count:
+                raise ValueError("Zone payload size mismatch")
+            zone_pixels = chunk_payload
+        elif compression_type == ZEL_COMPRESSION_LZ4:
+            if lz4_block is None:
+                raise ValueError(
+                    "Cannot decode LZ4-compressed frame without the 'lz4' "
+                    "package."
+                )
+            try:
+                zone_pixels = lz4_block.decompress(
+                    chunk_payload,
+                    uncompressed_size=zone_pixel_count,
+                    return_bytearray=False,
+                )
+            except LZ4BlockError as exc:
+                raise ValueError("Failed to decompress LZ4 zone") from exc
+            if len(zone_pixels) != zone_pixel_count:
+                raise ValueError("Zone decompression size mismatch")
+        else:
             raise ValueError(
-                "Cannot decode LZ4-compressed frame without the 'lz4' "
-                "package."
+                f"Unsupported compression type {compression_type} in frame"
             )
-        try:
-            pixel_data = lz4_block.decompress(
-                compressed_payload,
-                uncompressed_size=pixel_count,
-                return_bytearray=False,
-            )
-        except LZ4BlockError as exc:
-            raise ValueError("Failed to decompress LZ4 frame") from exc
-        if len(pixel_data) != pixel_count:
-            raise ValueError("Decompressed pixel data size mismatch")
-    else:
-        raise ValueError(
-            f"Unsupported compression type {compression_type} in frame"
-        )
+
+        zone_x = (zone_index % zones_per_row) * zone_width
+        zone_y = (zone_index // zones_per_row) * zone_height
+        for row in range(zone_height):
+            dest_start = (zone_y + row) * width + zone_x
+            dest_end = dest_start + zone_width
+            src_start = row * zone_width
+            indices[dest_start:dest_end] = zone_pixels[
+                src_start:src_start + zone_width
+            ]
+
+    if zone_offset != pixel_data_end:
+        raise ValueError("Extra data after zone payloads")
+
+    pixel_data = bytes(indices)
 
     palette_rgb = [
         rgb565_to_rgb888(value) for value in palette_rgb565_for_frame
@@ -550,19 +630,19 @@ def main():
         help="Frame duration in ms (encode mode, default: 16)",
     )
     parser.add_argument(
-        "--tile-width",
+        "--zone-width",
         type=int,
         help=(
-            "Tile width written to the header (encode mode, 1-255). "
-            "Default: min(image width, 255)"
+            "Zone width written to the header (encode mode, 1-65535). "
+            "Default: min(image width, 65535)"
         ),
     )
     parser.add_argument(
-        "--tile-height",
+        "--zone-height",
         type=int,
         help=(
-            "Tile height written to the header (encode mode, 1-255). "
-            "Default: min(image height, 255)"
+            "Zone height written to the header (encode mode, 1-65535). "
+            "Default: min(image height, 65535)"
         ),
     )
     parser.add_argument(
@@ -587,8 +667,8 @@ def main():
             args.input,
             args.output,
             args.duration,
-            tile_width_override=args.tile_width,
-            tile_height_override=args.tile_height,
+            zone_width_override=args.zone_width,
+            zone_height_override=args.zone_height,
             compression=args.compression,
         )
     else:

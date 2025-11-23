@@ -59,8 +59,8 @@ typedef struct {
     uint16_t headerSize; /* sizeof(ZELFileHeader) */
     uint16_t width;
     uint16_t height;
-    uint8_t tileWidth;
-    uint8_t tileHeight;
+    uint16_t zoneWidth;
+    uint16_t zoneHeight;
     uint8_t colorFormat; /* ZELColorFormat */
     ZELHeaderFlags flags;
     uint32_t frameCount;
@@ -79,7 +79,7 @@ typedef struct {
     uint8_t blockType;
     uint8_t headerSize;
     ZELFrameFlags flags;
-    uint16_t tileCount;
+    uint16_t zoneCount;
     uint8_t compressionType; /* ZELCompressionType */
     uint16_t referenceFrameIndex;
     uint16_t localPaletteEntryCount;
@@ -126,8 +126,14 @@ ZELResult zelGetFrameUsesLocalPalette(const ZELContext *ctx, uint32_t frameIndex
 ZELResult zelDecodeFrameIndex8(const ZELContext *ctx, uint32_t frameIndex, uint8_t *dst,
                                size_t dstStrideBytes);
 
+ZELResult zelDecodeFrameIndex8Zone(const ZELContext *ctx, uint32_t frameIndex, uint32_t zoneIndex,
+                                   uint8_t *dst, size_t dstStrideBytes);
+
 ZELResult zelDecodeFrameRgb565(const ZELContext *ctx, uint32_t frameIndex, uint16_t *dst,
                                size_t dstStridePixels);
+
+ZELResult zelDecodeFrameRgb565Zone(const ZELContext *ctx, uint32_t frameIndex, uint32_t zoneIndex,
+                                   uint16_t *dst, size_t dstStridePixels);
 
 ZELResult zelGetTotalDurationMs(const ZELContext *ctx, uint32_t *outTotalDurationMs);
 
