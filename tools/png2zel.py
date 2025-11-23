@@ -33,6 +33,18 @@ ZEL_COMPRESSION_NONE = 0
 ZEL_COMPRESSION_LZ4 = 1
 
 
+def _print_progress(prefix, current, total, silent):
+    if silent or total <= 0:
+        return
+    bar_width = 30
+    ratio = min(max(current / total, 0.0), 1.0)
+    filled = int(ratio * bar_width)
+    bar = "#" * filled + "-" * (bar_width - filled)
+    print(f"\r{prefix} [{bar}] {current}/{total}", end="", flush=True)
+    if current >= total:
+        print()
+
+
 def rgb_to_rgb565(r, g, b):
     r5 = (r & 0xF8) >> 3
     g6 = (g & 0xFC) >> 2
@@ -136,8 +148,8 @@ def _collect_frame_paths(input_path):
     raise ValueError("Input path does not exist.")
 
 
-def _encode_frame(frame_path, expected_size):
-    img = Image.open(frame_path).convert("RGBA")
+def _encode_frame(frame_path, expected_size, force_pad_palette):
+    img = Image.open(frame_path)
     width, height = img.size
 
     if expected_size is not None and (width, height) != expected_size:
@@ -146,7 +158,11 @@ def _encode_frame(frame_path, expected_size):
             f"expected {expected_size[0]}x{expected_size[1]}."
         )
 
-    pal_img = quantize_image(img)
+    if img.mode == "P" and img.getpalette() is not None:
+        pal_img = img.copy()
+    else:
+        pal_img = quantize_image(img.convert("RGBA"))
+
     palette = pal_img.getpalette()
     if palette is None:
         raise ValueError(
@@ -156,30 +172,45 @@ def _encode_frame(frame_path, expected_size):
         palette = palette + [0] * (256 * 3 - len(palette))
 
     indices = list(pal_img.getdata())
-    pixel_data = bytes(indices)
-    max_index = max(indices) if indices else 0
-    used_entries = max_index + 1 if indices else 1
-    if used_entries > 256:
-        raise ValueError(
-            f"Palette for '{frame_path}' has more than 256 colors."
-        )
+    if not indices:
+        indices = [0]
 
+    remapped = bytearray(len(indices))
     palette_rgb565 = []
-    for i in range(used_entries):
-        base = 3 * i
+    color_to_new_index = {}
+
+    for pos, original in enumerate(indices):
+        base = 3 * original
+        if base + 2 >= len(palette):
+            raise ValueError(
+                f"Palette index {original} out of range for '{frame_path}'."
+            )
         r = palette[base]
         g = palette[base + 1]
         b = palette[base + 2]
-        palette_rgb565.append(rgb_to_rgb565(r, g, b))
+        color565 = rgb_to_rgb565(r, g, b)
+        new_index = color_to_new_index.get(color565)
+        if new_index is None:
+            new_index = len(palette_rgb565)
+            if new_index >= 256:
+                raise ValueError(
+                    f"Palette for '{frame_path}' has more than 256 colors."
+                )
+            color_to_new_index[color565] = new_index
+            palette_rgb565.append(color565)
+        remapped[pos] = new_index
 
-    colors_used = len(set(palette_rgb565))
+    pixel_data = bytes(remapped)
+    colors_used = len(palette_rgb565)
+    if force_pad_palette and colors_used < 256:
+        palette_rgb565.extend([0] * (256 - colors_used))
 
     return {
         "path": frame_path,
         "width": width,
         "height": height,
         "palette": palette_rgb565,
-        "palette_count": used_entries,
+        "palette_count": len(palette_rgb565),
         "colors_used": colors_used,
         "pixels": pixel_data,
     }
@@ -192,16 +223,26 @@ def png_to_zel(
     zone_width_override=None,
     zone_height_override=None,
     compression="lz4",
+    silent=False,
+    use_lz4_high_compression=True,
+    force_pad_palette=False,
 ):
     frame_paths = _collect_frame_paths(input_path)
     expected_size = None
     frame_infos = []
 
     for frame_path in frame_paths:
-        info = _encode_frame(frame_path, expected_size)
+        info = _encode_frame(
+            frame_path,
+            expected_size,
+            force_pad_palette,
+        )
         if expected_size is None:
             expected_size = (info["width"], info["height"])
         frame_infos.append(info)
+
+    if expected_size is None:
+        raise ValueError("No frames were provided for encoding.")
 
     width, height = expected_size
     frame_count = len(frame_infos)
@@ -219,6 +260,11 @@ def png_to_zel(
         raise RuntimeError(
             "LZ4 compression requested but the 'lz4' package is not "
             "installed. Install it via 'pip install lz4'."
+        )
+    lz4_mode = None
+    if compression_type == ZEL_COMPRESSION_LZ4:
+        lz4_mode = (
+            "high_compression" if use_lz4_high_compression else "default"
         )
 
     if zone_width_override is None:
@@ -315,6 +361,7 @@ def png_to_zel(
                     chunk_payload = lz4_block.compress(
                         chunk_payload,
                         store_size=False,
+                        mode=lz4_mode,
                     )
                 except LZ4BlockError as exc:
                     raise RuntimeError(
@@ -359,6 +406,7 @@ def png_to_zel(
         )
         frame_blocks.append(frame_bytes)
         current_offset += frame_size
+        _print_progress("Encoding frames", index + 1, frame_count, silent)
 
     zel_bytes = (
         file_header + b"".join(frame_index_entries) + b"".join(frame_blocks)
@@ -367,28 +415,33 @@ def png_to_zel(
     with open(output_path, "wb") as output_file:
         output_file.write(zel_bytes)
 
-    print(f"Wrote ZEL file: {output_path}")
-    print(f"  Size: {len(zel_bytes)} bytes")
-    print(f"  Compression: {compression_choice}")
-    print(
-        "  Frames: "
-        f"{frame_count}, default duration: {default_frame_duration_ms} ms"
-    )
-    print(
-        "  Image: "
-        f"{width}x{height}, zone {zone_width}x{zone_height}"
-    )
-    for index, info in enumerate(frame_infos):
+    if not silent:
+        print(f"Wrote ZEL file: {output_path}")
+        print(f"  Size: {len(zel_bytes)} bytes")
+        print(f"  Compression: {compression_choice}")
         print(
-            "    Frame "
-            f"{index}: colors used {info['colors_used']}, "
-            f"palette entries {info['palette_count']}, "
-            f"payload {info.get('compressed_size', len(info['pixels']))} bytes"
-            f" (raw {len(info['pixels'])} bytes)"
+            "  Frames: "
+            f"{frame_count}, default duration: {default_frame_duration_ms} ms"
         )
+        print(
+            "  Image: "
+            f"{width}x{height}, zone {zone_width}x{zone_height}"
+        )
+        for index, info in enumerate(frame_infos):
+            payload_bytes = info.get(
+                "compressed_size",
+                len(info["pixels"]),
+            )
+            raw_bytes = len(info["pixels"])
+            print(
+                "    Frame "
+                f"{index}: colors used {info['colors_used']}, "
+                f"palette entries {info['palette_count']}, "
+                f"payload {payload_bytes} bytes (raw {raw_bytes} bytes)"
+            )
 
 
-def zel_to_png(input_path, output_path, frame_index=0):
+def zel_to_png(input_path, output_path, frame_index=0, silent=False):
     with open(input_path, "rb") as input_file:
         data = input_file.read()
 
@@ -600,12 +653,13 @@ def zel_to_png(input_path, output_path, frame_index=0):
     img.putdata(pixels)
     img.save(output_path, format="PNG")
 
-    print(f"Wrote PNG file: {output_path}")
-    print(
-        "  Size: "
-        f"{width}x{height} pixels, frame {frame_index}, "
-        f"duration {default_frame_duration} ms"
-    )
+    if not silent:
+        print(f"Wrote PNG file: {output_path}")
+        print(
+            "  Size: "
+            f"{width}x{height} pixels, frame {frame_index}, "
+            f"duration {default_frame_duration} ms"
+        )
 
 
 def main():
@@ -655,6 +709,26 @@ def main():
         ),
     )
     parser.add_argument(
+        "--pad-palette",
+        action="store_true",
+        help=(
+            "Pad palettes up to 256 entries even if fewer colors are used."
+        ),
+    )
+    parser.add_argument(
+        "--no-lz4-high-compression",
+        action="store_true",
+        help=(
+            "Disable the default LZ4 high-compression mode when encoding. "
+            "When set, standard LZ4 compression is used instead."
+        ),
+    )
+    parser.add_argument(
+        "--silent",
+        action="store_true",
+        help="Suppress all console output.",
+    )
+    parser.add_argument(
         "--frame",
         type=int,
         default=0,
@@ -670,9 +744,19 @@ def main():
             zone_width_override=args.zone_width,
             zone_height_override=args.zone_height,
             compression=args.compression,
+            silent=args.silent,
+            use_lz4_high_compression=(
+                not args.no_lz4_high_compression
+            ),
+            force_pad_palette=args.pad_palette,
         )
     else:
-        zel_to_png(args.input, args.output, frame_index=args.frame)
+        zel_to_png(
+            args.input,
+            args.output,
+            frame_index=args.frame,
+            silent=args.silent,
+        )
 
 
 if __name__ == "__main__":
