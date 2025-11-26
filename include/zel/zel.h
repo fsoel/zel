@@ -109,35 +109,52 @@ uint16_t zelGetDefaultFrameDurationMs(const ZELContext *ctx);
 
 int zelHasGlobalPalette(const ZELContext *ctx);
 
-ZELResult zelGetGlobalPalette(const ZELContext *ctx, const uint16_t **outEntries,
+ZELResult zelGetGlobalPalette(const ZELContext *ctx,
+                              const uint16_t **outEntries,
                               uint16_t *outCount);
 
-ZELResult zelGetFramePalette(const ZELContext *ctx, uint32_t frameIndex,
-                             const uint16_t **outEntries, uint16_t *outCount);
+ZELResult zelGetFramePalette(const ZELContext *ctx,
+                             uint32_t frameIndex,
+                             const uint16_t **outEntries,
+                             uint16_t *outCount);
 
-ZELResult zelGetFrameDurationMs(const ZELContext *ctx, uint32_t frameIndex,
+ZELResult zelGetFrameDurationMs(const ZELContext *ctx,
+                                uint32_t frameIndex,
                                 uint16_t *outDurationMs);
 
 ZELResult zelGetFrameIsKeyframe(const ZELContext *ctx, uint32_t frameIndex, int *outIsKeyframe);
 
-ZELResult zelGetFrameUsesLocalPalette(const ZELContext *ctx, uint32_t frameIndex,
+ZELResult zelGetFrameUsesLocalPalette(const ZELContext *ctx,
+                                      uint32_t frameIndex,
                                       int *outUsesLocalPalette);
 
-ZELResult zelDecodeFrameIndex8(const ZELContext *ctx, uint32_t frameIndex, uint8_t *dst,
+ZELResult zelDecodeFrameIndex8(const ZELContext *ctx,
+                               uint32_t frameIndex,
+                               uint8_t *dst,
                                size_t dstStrideBytes);
 
-ZELResult zelDecodeFrameIndex8Zone(const ZELContext *ctx, uint32_t frameIndex, uint32_t zoneIndex,
-                                   uint8_t *dst, size_t dstStrideBytes);
+ZELResult zelDecodeFrameIndex8Zone(const ZELContext *ctx,
+                                   uint32_t frameIndex,
+                                   uint32_t zoneIndex,
+                                   uint8_t *dst,
+                                   size_t dstStrideBytes);
 
-ZELResult zelDecodeFrameRgb565(const ZELContext *ctx, uint32_t frameIndex, uint16_t *dst,
+ZELResult zelDecodeFrameRgb565(const ZELContext *ctx,
+                               uint32_t frameIndex,
+                               uint16_t *dst,
                                size_t dstStridePixels);
 
-ZELResult zelDecodeFrameRgb565Zone(const ZELContext *ctx, uint32_t frameIndex, uint32_t zoneIndex,
-                                   uint16_t *dst, size_t dstStridePixels);
+ZELResult zelDecodeFrameRgb565Zone(const ZELContext *ctx,
+                                   uint32_t frameIndex,
+                                   uint32_t zoneIndex,
+                                   uint16_t *dst,
+                                   size_t dstStridePixels);
 
 ZELResult zelGetTotalDurationMs(const ZELContext *ctx, uint32_t *outTotalDurationMs);
 
-ZELResult zelFindFrameByTimeMs(const ZELContext *ctx, uint32_t timeMs, uint32_t *outFrameIndex,
+ZELResult zelFindFrameByTimeMs(const ZELContext *ctx,
+                               uint32_t timeMs,
+                               uint32_t *outFrameIndex,
                                uint32_t *outFrameStartMs);
 
 const char *zelResultToString(ZELResult result);
