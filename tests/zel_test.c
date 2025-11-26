@@ -6,6 +6,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+static uint16_t swap_u16(uint16_t v) {
+    return (uint16_t)(((v & 0x00FFu) << 8) | ((v & 0xFF00u) >> 8));
+}
+
+static const uint8_t kSimpleFramePattern[8] = {0, 1, 0, 1, 1, 0, 1, 0};
+
+static void build_expected_rgb_frame(uint16_t *dst, const uint16_t palette[2]) {
+    for (size_t i = 0; i < 8; ++i)
+        dst[i] = palette[kSimpleFramePattern[i]];
+}
+
 static void write_zone_chunks(uint8_t *dst,
                               size_t *offset,
                               const uint8_t *pixels,
@@ -77,9 +88,28 @@ static void blit_rgb_zone_to_frame(uint32_t zoneIndex,
     - no compression
     Pixel pattern: 0,1,0,1 / 1,0,1,0
 */
-static uint8_t *buildSimpleZelSingleFrameWithZones(uint16_t zoneWidth,
-                                                   uint16_t zoneHeight,
-                                                   size_t *outSize) {
+static void write_palette_bytes(uint8_t *dst,
+                                const uint16_t *palette,
+                                uint16_t count,
+                                ZELColorEncoding encoding) {
+    for (uint16_t i = 0; i < count; ++i) {
+        uint16_t value = palette[i];
+        if (encoding == ZEL_COLOR_RGB565_BE) {
+            dst[2 * i] = (uint8_t)(value >> 8);
+            dst[2 * i + 1] = (uint8_t)(value & 0xFF);
+        } else {
+            dst[2 * i] = (uint8_t)(value & 0xFF);
+            dst[2 * i + 1] = (uint8_t)(value >> 8);
+        }
+    }
+}
+
+static uint8_t *buildSimpleZelSingleFrameWithZonesCustom(uint16_t zoneWidth,
+                                                         uint16_t zoneHeight,
+                                                         const uint16_t *paletteEntries,
+                                                         uint16_t paletteEntryCount,
+                                                         ZELColorEncoding paletteEncoding,
+                                                         size_t *outSize) {
     enum { WIDTH = 4, HEIGHT = 2, PIXEL_COUNT = WIDTH * HEIGHT };
     const uint16_t width = WIDTH;
     const uint16_t height = HEIGHT;
@@ -108,12 +138,8 @@ static uint8_t *buildSimpleZelSingleFrameWithZones(uint16_t zoneWidth,
     memset(&ph, 0, sizeof(ph));
     ph.type = ZEL_PALETTE_TYPE_GLOBAL;
     ph.headerSize = sizeof(ZELPaletteHeader);
-    ph.entryCount = 2;
-    ph.colorEncoding = ZEL_COLOR_RGB565;
-
-    uint16_t palette[2];
-    palette[0] = 0x0000; /* black */
-    palette[1] = 0xFFFF; /* white */
+    ph.entryCount = paletteEntryCount;
+    ph.colorEncoding = paletteEncoding;
 
     ZELFrameHeader frh;
     memset(&frh, 0, sizeof(frh));
@@ -137,7 +163,9 @@ static uint8_t *buildSimpleZelSingleFrameWithZones(uint16_t zoneWidth,
     fie.frameDuration = 16;
     fie.frameSize = (uint32_t)frameBlockSize;
 
-    size_t size = sizeof(ZELFileHeader) + sizeof(ZELPaletteHeader) + sizeof(palette)
+    const size_t paletteBytes = (size_t)paletteEntryCount * sizeof(uint16_t);
+
+    size_t size = sizeof(ZELFileHeader) + sizeof(ZELPaletteHeader) + paletteBytes
                   + sizeof(ZELFrameIndexEntry) + frameBlockSize;
 
     uint8_t *buf = (uint8_t *)malloc(size);
@@ -151,8 +179,12 @@ static uint8_t *buildSimpleZelSingleFrameWithZones(uint16_t zoneWidth,
     memcpy(buf + off, &ph, sizeof(ph));
     off += sizeof(ph);
 
-    memcpy(buf + off, &palette[0], sizeof(palette));
-    off += sizeof(palette);
+    uint8_t *paletteBytesBuf = (uint8_t *)malloc(paletteBytes);
+    assert(paletteBytesBuf);
+    write_palette_bytes(paletteBytesBuf, paletteEntries, paletteEntryCount, paletteEncoding);
+    memcpy(buf + off, paletteBytesBuf, paletteBytes);
+    off += paletteBytes;
+    free(paletteBytesBuf);
 
     size_t frameIndexTableOffset = off;
     off += sizeof(fie);
@@ -173,6 +205,18 @@ static uint8_t *buildSimpleZelSingleFrameWithZones(uint16_t zoneWidth,
     if (outSize)
         *outSize = size;
     return buf;
+}
+
+static uint8_t *buildSimpleZelSingleFrameWithZones(uint16_t zoneWidth,
+                                                   uint16_t zoneHeight,
+                                                   size_t *outSize) {
+    static const uint16_t palette[2] = {0x0000, 0xFFFF};
+    return buildSimpleZelSingleFrameWithZonesCustom(zoneWidth,
+                                                    zoneHeight,
+                                                    palette,
+                                                    2,
+                                                    ZEL_COLOR_RGB565_LE,
+                                                    outSize);
 }
 
 static uint8_t *buildSimpleZelSingleFrame(size_t *outSize) {
@@ -217,7 +261,7 @@ static uint8_t *buildSimpleZelThreeFrames(size_t *outSize) {
     ph.type = ZEL_PALETTE_TYPE_GLOBAL;
     ph.headerSize = sizeof(ZELPaletteHeader);
     ph.entryCount = 2;
-    ph.colorEncoding = ZEL_COLOR_RGB565;
+    ph.colorEncoding = ZEL_COLOR_RGB565_LE;
 
     uint16_t palette[2] = {0x0000, 0xFFFF};
 
@@ -382,6 +426,90 @@ static void test_decode_rgb565(void) {
 
     zelClose(ctx);
     free(data);
+}
+
+static void test_palette_endianness_controls(void) {
+    size_t sizeLE = 0;
+    static const uint16_t paletteLE[2] = {0x00F8, 0x1234};
+    uint8_t *dataLE = buildSimpleZelSingleFrameWithZonesCustom(4,
+                                                               2,
+                                                               paletteLE,
+                                                               2,
+                                                               ZEL_COLOR_RGB565_LE,
+                                                               &sizeLE);
+    ZELResult res;
+    ZELContext *ctx = zelOpenMemory(dataLE, sizeLE, &res);
+    assert(ctx && res == ZEL_OK);
+
+    const uint16_t *pal = NULL;
+    uint16_t palCount = 0;
+    res = zelGetGlobalPalette(ctx, &pal, &palCount);
+    assert(res == ZEL_OK && palCount == 2);
+    assert(pal[0] == paletteLE[0]);
+    assert(pal[1] == paletteLE[1]);
+
+    uint16_t expected[8];
+    build_expected_rgb_frame(expected, paletteLE);
+
+    uint16_t frame[8];
+    memset(frame, 0, sizeof(frame));
+    res = zelDecodeFrameRgb565(ctx, 0, frame, 4);
+    assert(res == ZEL_OK);
+    assert(memcmp(frame, expected, sizeof(expected)) == 0);
+
+    uint16_t swappedPalette[2] = {swap_u16(paletteLE[0]), swap_u16(paletteLE[1])};
+    zelSetOutputColorEncoding(ctx, ZEL_COLOR_RGB565_BE);
+    res = zelGetGlobalPalette(ctx, &pal, &palCount);
+    assert(res == ZEL_OK && palCount == 2);
+    assert(pal[0] == swappedPalette[0]);
+    assert(pal[1] == swappedPalette[1]);
+
+    build_expected_rgb_frame(expected, swappedPalette);
+    memset(frame, 0, sizeof(frame));
+    res = zelDecodeFrameRgb565(ctx, 0, frame, 4);
+    assert(res == ZEL_OK);
+    assert(memcmp(frame, expected, sizeof(expected)) == 0);
+
+    zelClose(ctx);
+    free(dataLE);
+
+    size_t sizeBE = 0;
+    static const uint16_t paletteBE[2] = {0x0F1E, 0x00D1};
+    uint8_t *dataBE = buildSimpleZelSingleFrameWithZonesCustom(4,
+                                                               2,
+                                                               paletteBE,
+                                                               2,
+                                                               ZEL_COLOR_RGB565_BE,
+                                                               &sizeBE);
+    ctx = zelOpenMemory(dataBE, sizeBE, &res);
+    assert(ctx && res == ZEL_OK);
+
+    uint16_t swappedBE[2] = {swap_u16(paletteBE[0]), swap_u16(paletteBE[1])};
+    res = zelGetGlobalPalette(ctx, &pal, &palCount);
+    assert(res == ZEL_OK && palCount == 2);
+    assert(pal[0] == swappedBE[0]);
+    assert(pal[1] == swappedBE[1]);
+
+    build_expected_rgb_frame(expected, swappedBE);
+    memset(frame, 0, sizeof(frame));
+    res = zelDecodeFrameRgb565(ctx, 0, frame, 4);
+    assert(res == ZEL_OK);
+    assert(memcmp(frame, expected, sizeof(expected)) == 0);
+
+    zelSetOutputColorEncoding(ctx, ZEL_COLOR_RGB565_LE);
+    res = zelGetGlobalPalette(ctx, &pal, &palCount);
+    assert(res == ZEL_OK && palCount == 2);
+    assert(pal[0] == paletteBE[0]);
+    assert(pal[1] == paletteBE[1]);
+
+    build_expected_rgb_frame(expected, paletteBE);
+    memset(frame, 0, sizeof(frame));
+    res = zelDecodeFrameRgb565(ctx, 0, frame, 4);
+    assert(res == ZEL_OK);
+    assert(memcmp(frame, expected, sizeof(expected)) == 0);
+
+    zelClose(ctx);
+    free(dataBE);
 }
 
 static void test_zone_decoders(void) {
@@ -616,6 +744,7 @@ int main(void) {
     test_open_and_basic_getters();
     test_palette_and_decode_index8();
     test_decode_rgb565();
+    test_palette_endianness_controls();
     test_zone_decoders();
     test_timeline_helpers();
     test_open_and_basic_getters_binary();

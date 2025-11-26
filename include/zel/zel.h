@@ -20,7 +20,7 @@ typedef enum {
     ZEL_COMPRESSION_RLE = 2
 } ZELCompressionType;
 
-typedef enum { ZEL_COLOR_RGB565 = 0 } ZELColorEncoding;
+typedef enum { ZEL_COLOR_RGB565_LE = 0, ZEL_COLOR_RGB565_BE = 1 } ZELColorEncoding;
 
 typedef enum { ZEL_PALETTE_TYPE_GLOBAL = 0, ZEL_PALETTE_TYPE_LOCAL = 1 } ZELPaletteType;
 
@@ -108,6 +108,9 @@ uint32_t zelGetFrameCount(const ZELContext *ctx);
 uint16_t zelGetDefaultFrameDurationMs(const ZELContext *ctx);
 uint16_t zelGetZoneWidth(const ZELContext *ctx);
 uint16_t zelGetZoneHeight(const ZELContext *ctx);
+
+void zelSetOutputColorEncoding(ZELContext *ctx, ZELColorEncoding encoding);
+ZELColorEncoding zelGetOutputColorEncoding(const ZELContext *ctx);
 
 int zelHasGlobalPalette(const ZELContext *ctx);
 
