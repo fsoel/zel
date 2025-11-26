@@ -36,6 +36,40 @@ static void write_zone_chunks(uint8_t *dst,
     }
 }
 
+static void blit_indices_zone_to_frame(uint32_t zoneIndex,
+                                       uint16_t frameWidth,
+                                       uint16_t zoneWidth,
+                                       uint16_t zoneHeight,
+                                       uint8_t *frameDst,
+                                       const uint8_t *zonePixels) {
+    const uint32_t zonesPerRow = frameWidth / zoneWidth;
+    const uint32_t zoneX = (zoneIndex % zonesPerRow) * zoneWidth;
+    const uint32_t zoneY = (zoneIndex / zonesPerRow) * zoneHeight;
+
+    for (uint16_t row = 0; row < zoneHeight; ++row) {
+        uint8_t *dstRow = frameDst + (size_t)(zoneY + row) * frameWidth + zoneX;
+        const uint8_t *srcRow = zonePixels + (size_t)row * zoneWidth;
+        memcpy(dstRow, srcRow, zoneWidth);
+    }
+}
+
+static void blit_rgb_zone_to_frame(uint32_t zoneIndex,
+                                   uint16_t frameWidth,
+                                   uint16_t zoneWidth,
+                                   uint16_t zoneHeight,
+                                   uint16_t *frameDst,
+                                   const uint16_t *zonePixels) {
+    const uint32_t zonesPerRow = frameWidth / zoneWidth;
+    const uint32_t zoneX = (zoneIndex % zonesPerRow) * zoneWidth;
+    const uint32_t zoneY = (zoneIndex / zonesPerRow) * zoneHeight;
+
+    for (uint16_t row = 0; row < zoneHeight; ++row) {
+        uint16_t *dstRow = frameDst + (size_t)(zoneY + row) * frameWidth + zoneX;
+        const uint16_t *srcRow = zonePixels + (size_t)row * zoneWidth;
+        memcpy(dstRow, srcRow, (size_t)zoneWidth * sizeof(uint16_t));
+    }
+}
+
 /* Simple helper function: builds a simple ZEL file in memory with configurable zone size:
     - 4x2 pixels
     - 1 frame
@@ -362,23 +396,51 @@ static void test_zone_decoders(void) {
     static const uint16_t expectedRgb[8] =
             {0x0000, 0xFFFF, 0x0000, 0xFFFF, 0xFFFF, 0x0000, 0xFFFF, 0x0000};
 
-    uint8_t indices[8];
-    memset(indices, 0xCC, sizeof(indices));
-    for (uint32_t zone = 0; zone < 4; ++zone) {
-        res = zelDecodeFrameIndex8Zone(ctx, 0, zone, indices, 4);
+    const uint16_t width = zelGetWidth(ctx);
+    const uint16_t height = zelGetHeight(ctx);
+    const uint16_t zoneWidth = zelGetZoneWidth(ctx);
+    const uint16_t zoneHeight = zelGetZoneHeight(ctx);
+    assert(width != 0 && height != 0);
+    assert(zoneWidth != 0 && zoneHeight != 0);
+
+    const uint32_t zonesPerRow = width / zoneWidth;
+    const uint32_t zonesPerCol = height / zoneHeight;
+    const uint32_t zoneCount = zonesPerRow * zonesPerCol;
+    const size_t framePixelCount = (size_t)width * height;
+    const size_t zonePixelCount = (size_t)zoneWidth * zoneHeight;
+
+    assert(framePixelCount == sizeof(expectedIndices));
+    assert(framePixelCount == (sizeof(expectedRgb) / sizeof(expectedRgb[0])));
+
+    uint8_t *indices = (uint8_t *)malloc(framePixelCount);
+    uint16_t *rgb = (uint16_t *)malloc(framePixelCount * sizeof(uint16_t));
+    uint8_t *zoneIndexBuf = (uint8_t *)malloc(zonePixelCount);
+    uint16_t *zoneRgbBuf = (uint16_t *)malloc(zonePixelCount * sizeof(uint16_t));
+    assert(indices && rgb && zoneIndexBuf && zoneRgbBuf);
+
+    memset(indices, 0xCC, framePixelCount);
+    memset(rgb, 0x00, framePixelCount * sizeof(uint16_t));
+
+    for (uint32_t zone = 0; zone < zoneCount; ++zone) {
+        res = zelDecodeFrameIndex8Zone(ctx, 0, zone, zoneIndexBuf);
         assert(res == ZEL_OK);
+        blit_indices_zone_to_frame(zone, width, zoneWidth, zoneHeight, indices, zoneIndexBuf);
     }
     assert(memcmp(indices, expectedIndices, sizeof(expectedIndices)) == 0);
 
-    uint16_t rgb[8];
-    memset(rgb, 0x00, sizeof(rgb));
-    for (uint32_t zone = 0; zone < 4; ++zone) {
-        res = zelDecodeFrameRgb565Zone(ctx, 0, zone, rgb, 4);
+    for (uint32_t zone = 0; zone < zoneCount; ++zone) {
+        res = zelDecodeFrameRgb565Zone(ctx, 0, zone, zoneRgbBuf);
         assert(res == ZEL_OK);
+        blit_rgb_zone_to_frame(zone, width, zoneWidth, zoneHeight, rgb, zoneRgbBuf);
     }
-    for (size_t i = 0; i < 8; ++i) {
+    for (size_t i = 0; i < framePixelCount; ++i) {
         assert(rgb[i] == expectedRgb[i]);
     }
+
+    free(zoneRgbBuf);
+    free(zoneIndexBuf);
+    free(rgb);
+    free(indices);
 
     zelClose(ctx);
     free(data);

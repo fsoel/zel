@@ -442,6 +442,14 @@ uint16_t zelGetDefaultFrameDurationMs(const ZELContext *ctx) {
     return ctx ? ctx->header.defaultFrameDuration : 0;
 }
 
+uint16_t zelGetZoneWidth(const ZELContext *ctx) {
+    return ctx ? ctx->header.zoneWidth : 0;
+}
+
+uint16_t zelGetZoneHeight(const ZELContext *ctx) {
+    return ctx ? ctx->header.zoneHeight : 0;
+}
+
 int zelHasGlobalPalette(const ZELContext *ctx) {
     return (ctx && ctx->globalPalette && ctx->globalPaletteCount > 0);
 }
@@ -620,17 +628,12 @@ ZELResult zelDecodeFrameIndex8(const ZELContext *ctx,
 ZELResult zelDecodeFrameIndex8Zone(const ZELContext *ctx,
                                    uint32_t frameIndex,
                                    uint32_t zoneIndex,
-                                   uint8_t *dst,
-                                   size_t dstStrideBytes) {
+                                   uint8_t *dst) {
     if (!ctx || !dst)
         return ZEL_ERR_INVALID_ARGUMENT;
 
     if (ctx->header.colorFormat != ZEL_COLOR_FORMAT_INDEXED8)
         return ZEL_ERR_UNSUPPORTED_FORMAT;
-
-    uint16_t width = ctx->header.width;
-    if (dstStrideBytes < width)
-        return ZEL_ERR_INVALID_ARGUMENT;
 
     ZELFrameZoneStream stream;
     ZELResult result = zelInitFrameZoneStream(ctx, frameIndex, &stream);
@@ -654,7 +657,11 @@ ZELResult zelDecodeFrameIndex8Zone(const ZELContext *ctx,
         const uint8_t *zonePixels = NULL;
         result = zelAccessZonePixels(ctx, &stream, chunkData, chunkSize, scratch, &zonePixels);
         if (result == ZEL_OK)
-            zelBlitZoneIndices(&stream.layout, zoneIndex, zonePixels, dst, dstStrideBytes);
+            zelBlitZoneIndices(&stream.layout,
+                               0,
+                               zonePixels,
+                               dst,
+                               stream.layout.zoneWidth); /* zoneIndex=0 writes a contiguous tile */
     }
 
     if (scratch)
@@ -731,17 +738,12 @@ ZELResult zelDecodeFrameRgb565(const ZELContext *ctx,
 ZELResult zelDecodeFrameRgb565Zone(const ZELContext *ctx,
                                    uint32_t frameIndex,
                                    uint32_t zoneIndex,
-                                   uint16_t *dst,
-                                   size_t dstStridePixels) {
+                                   uint16_t *dst) {
     if (!ctx || !dst)
         return ZEL_ERR_INVALID_ARGUMENT;
 
     if (ctx->header.colorFormat != ZEL_COLOR_FORMAT_INDEXED8)
         return ZEL_ERR_UNSUPPORTED_FORMAT;
-
-    uint16_t width = ctx->header.width;
-    if (dstStridePixels < width)
-        return ZEL_ERR_INVALID_ARGUMENT;
 
     const uint16_t *palette = NULL;
     uint16_t paletteCount = 0;
@@ -772,12 +774,12 @@ ZELResult zelDecodeFrameRgb565Zone(const ZELContext *ctx,
         result = zelAccessZonePixels(ctx, &stream, chunkData, chunkSize, scratch, &zonePixels);
         if (result == ZEL_OK)
             result = zelBlitZoneRgb(&stream.layout,
-                                    zoneIndex,
+                                    0,
                                     zonePixels,
                                     palette,
                                     paletteCount,
                                     dst,
-                                    dstStridePixels);
+                                    stream.layout.zoneWidth); /* contiguous tile buffer */
     }
 
     if (scratch)
