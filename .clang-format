@@ -1,5 +1,65 @@
 BasedOnStyle: LLVM
+
+# Indentation & width
 IndentWidth: 4
+TabWidth: 4
 UseTab: Never
+ContinuationIndentWidth: 8
 ColumnLimit: 100
-AllowShortIfStatementsOnASingleLine: false
+
+# Braces: K&R / 1TBS (brace on same line)
+BreakBeforeBraces: Attach
+BraceWrapping:
+  AfterFunction: false
+  AfterControlStatement: false
+  AfterEnum: false
+  AfterStruct: false
+  AfterUnion: false
+  AfterExternBlock: false
+  BeforeElse: false
+  BeforeCatch: false
+  IndentBraces: false
+
+# Control statements: never one-line if/for/while
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: None
+
+# Switch/case
+IndentCaseLabels: true
+IndentCaseBlocks: false
+
+# Spacing
+SpaceBeforeParens: ControlStatements
+SpaceAfterCStyleCast: false
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+SpaceInEmptyParentheses: false
+SpacesBeforeTrailingComments: 1
+
+# Alignment
+AlignOperands: Align
+AlignTrailingComments: true
+PointerAlignment: Right
+
+# Line breaking / parameters & arguments
+BinPackParameters: false
+BinPackArguments: false
+AllowAllParametersOfDeclarationOnNextLine: false
+AllowAllArgumentsOnNextLine: false
+AlignAfterOpenBracket: Align
+BreakBeforeBinaryOperators: NonAssignment
+AlwaysBreakAfterReturnType: None
+PenaltyReturnTypeOnItsOwnLine: 1000000
+
+# Includes
+SortIncludes: true
+IncludeBlocks: Regroup
+
+# Comments
+ReflowComments: true
+CommentPragmas: '^ IWYU pragma:'
+
+# Misc
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
