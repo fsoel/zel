@@ -13,11 +13,11 @@ OBJ := $(patsubst %.c,build/%.o,$(SRC))
 LIB := build/libzel.a
 
 rwildcard = $(foreach d,$(wildcard $1*/),$(call rwildcard,$d,$2)) $(wildcard $1$2)
-HEADERS := $(call rwildcard,include/,*.h)
-FMT_FILES := $(sort $(SRC) $(HEADERS))
 TEST_SRC := $(wildcard tests/*.c)
 TEST_OBJ := $(patsubst tests/%.c,build/tests/%.o,$(TEST_SRC))
 TEST_BIN := $(patsubst tests/%.c,build/tests/%,$(TEST_SRC))
+HEADERS := $(call rwildcard,include/,*.h) $(call rwildcard,tests/,*.h)
+FMT_FILES := $(sort $(SRC) $(HEADERS) $(TEST_SRC))
 
 .PHONY: all clean test lint format dirs
 
