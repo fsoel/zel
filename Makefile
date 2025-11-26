@@ -6,7 +6,7 @@ CFLAGS ?= -std=c11 -Wall -Wextra -Wpedantic -O2
 CPPFLAGS ?= -Iinclude
 CLANG_FORMAT ?= clang-format
 MKDIR_P ?= mkdir -p
-RM ?= rm -rf
+RM := rm -rf
 
 SRC := $(wildcard src/*.c) $(wildcard lib/lz4/*.c)
 OBJ := $(patsubst %.c,build/%.o,$(SRC))
