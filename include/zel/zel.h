@@ -108,6 +108,7 @@ uint32_t zelGetFrameCount(const ZELContext *ctx);
 uint16_t zelGetDefaultFrameDurationMs(const ZELContext *ctx);
 uint16_t zelGetZoneWidth(const ZELContext *ctx);
 uint16_t zelGetZoneHeight(const ZELContext *ctx);
+ZELColorFormat zelGetColorFormat(const ZELContext *ctx);
 
 void zelSetOutputColorEncoding(ZELContext *ctx, ZELColorEncoding encoding);
 ZELColorEncoding zelGetOutputColorEncoding(const ZELContext *ctx);

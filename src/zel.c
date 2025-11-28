@@ -547,6 +547,10 @@ uint16_t zelGetZoneHeight(const ZELContext *ctx) {
     return ctx ? ctx->header.zoneHeight : 0;
 }
 
+ZELColorFormat zelGetColorFormat(const ZELContext *ctx) {
+    return ctx ? (ZELColorFormat)ctx->header.colorFormat : ZEL_COLOR_FORMAT_INDEXED8;
+}
+
 void zelSetOutputColorEncoding(ZELContext *ctx, ZELColorEncoding encoding) {
     if (!ctx)
         return;
@@ -643,11 +647,7 @@ static ZELResult zelResolveLocalPalette(const ZELContext *ctx,
     if (!scratch)
         return ZEL_ERR_OUT_OF_MEMORY;
 
-    zelConvertPaletteEncoding(paletteData,
-                              scratch,
-                              ph->entryCount,
-                              sourceEncoding,
-                              desired);
+    zelConvertPaletteEncoding(paletteData, scratch, ph->entryCount, sourceEncoding, desired);
 
     *outEntries = scratch;
     *outCount = ph->entryCount;
