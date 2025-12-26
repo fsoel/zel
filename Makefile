@@ -5,6 +5,9 @@ ARFLAGS ?= rcs
 CFLAGS ?= -std=c11 -Wall -Wextra -Wpedantic -O2
 CPPFLAGS ?= -Iinclude -Isrc -Ilib
 CLANG_FORMAT ?= clang-format
+SCAN_BUILD ?= scan-build
+SCAN_FLAGS ?= --status-bugs
+SCAN_EXCLUDES ?= --exclude 'lib/*'
 MKDIR_P ?= mkdir -p
 RM := rm -rf
 
@@ -22,7 +25,7 @@ TEST_BIN := $(patsubst tests/%.c,build/tests/%,$(TEST_SRC))
 HEADERS := $(call rwildcard,include/,*.h) $(call rwildcard,tests/,*.h) src/zel_internal.h
 FMT_FILES := $(sort $(SRC) $(HEADERS) $(TEST_SRC))
 
-.PHONY: all clean test lint format dirs amalgamate single
+.PHONY: all clean test lint format scan dirs amalgamate single
 
 all: $(LIB)
 
@@ -71,6 +74,9 @@ ifeq ($(strip $(FMT_FILES)),)
 else
 	@$(CLANG_FORMAT) -i $(FMT_FILES)
 endif
+
+scan:
+	@$(SCAN_BUILD) $(SCAN_FLAGS) $(SCAN_EXCLUDES) $(MAKE) clean all
 
 amalgamate: $(AMALG)
 single: $(AMALG)

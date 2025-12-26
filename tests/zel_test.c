@@ -2,6 +2,7 @@
 #include "zel/zel.h"
 
 #include <assert.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -698,6 +699,111 @@ static void test_result_to_string(void) {
     assert(s && strstr(s, "INVALID_MAGIC") != NULL);
 }
 
+static void expect_open_failure(uint8_t *data, size_t size, ZELResult expected) {
+    ZELResult res = ZEL_OK;
+    ZELContext *ctx = zelOpenMemory(data, size, &res);
+    assert(ctx == NULL);
+    assert(res == expected);
+}
+
+static void test_invalid_headers_and_sizes(void) {
+    size_t size = 0;
+    uint8_t *base = buildSimpleZelSingleFrame(&size);
+
+    uint8_t *buf = (uint8_t *)malloc(size);
+    assert(buf);
+
+    memcpy(buf, base, size);
+    buf[0] = 'B';
+    expect_open_failure(buf, size, ZEL_ERR_INVALID_MAGIC);
+
+    memcpy(buf, base, size);
+    write_le16(buf + 6, (uint16_t)(size + 10));
+    expect_open_failure(buf, size, ZEL_ERR_CORRUPT_DATA);
+
+    memcpy(buf, base, size);
+    write_le16(buf + 8, 0);
+    expect_open_failure(buf, size, ZEL_ERR_INVALID_MAGIC);
+
+    memcpy(buf, base, size);
+    buf[0x10] = 5;
+    expect_open_failure(buf, size, ZEL_ERR_INVALID_MAGIC);
+
+    memcpy(buf, base, size);
+    buf[0x11] = 0; /* no frame index table flag */
+    expect_open_failure(buf, size, ZEL_ERR_UNSUPPORTED_FORMAT);
+
+    free(buf);
+    free(base);
+}
+
+static void test_corrupt_zone_chunks(void) {
+    size_t size = 0;
+    uint8_t *base = buildSimpleZelSingleFrame(&size);
+
+    const size_t paletteBytes = 2 * sizeof(uint16_t);
+    size_t chunkOffset = ZEL_FILE_HEADER_DISK_SIZE + ZEL_PALETTE_HEADER_DISK_SIZE + paletteBytes
+                         + ZEL_FRAME_INDEX_ENTRY_DISK_SIZE + ZEL_FRAME_HEADER_DISK_SIZE;
+
+    uint8_t *buf = (uint8_t *)malloc(size);
+    assert(buf);
+
+    memcpy(buf, base, size);
+    write_le32(buf + chunkOffset, 0);
+    ZELResult res = ZEL_OK;
+    ZELContext *ctx = zelOpenMemory(buf, size, &res);
+    assert(ctx && res == ZEL_OK);
+    uint8_t tmp[8];
+    res = zelDecodeFrameIndex8(ctx, 0, tmp, 4);
+    assert(res == ZEL_ERR_CORRUPT_DATA);
+    zelClose(ctx);
+
+    memcpy(buf, base, size);
+    write_le32(buf + chunkOffset, 9); /* larger than zone bytes */
+    ctx = zelOpenMemory(buf, size, &res);
+    assert(ctx && res == ZEL_OK);
+    res = zelDecodeFrameIndex8(ctx, 0, tmp, 4);
+    assert(res == ZEL_ERR_CORRUPT_DATA);
+    zelClose(ctx);
+
+    free(buf);
+    free(base);
+}
+
+static void test_zone_index_out_of_bounds(void) {
+    size_t size = 0;
+    uint8_t *data = buildSimpleZelSingleFrame(&size);
+    ZELResult res = ZEL_OK;
+    ZELContext *ctx = zelOpenMemory(data, size, &res);
+    assert(ctx && res == ZEL_OK);
+
+    uint8_t buf[8];
+    res = zelDecodeFrameIndex8Zone(ctx, 0, 1, buf);
+    assert(res == ZEL_ERR_OUT_OF_BOUNDS);
+
+    zelClose(ctx);
+    free(data);
+}
+
+static void test_stress_open_close_decode(void) {
+    size_t size = 0;
+    uint8_t *data = buildSimpleZelSingleFrame(&size);
+
+    for (int i = 0; i < 256; ++i) {
+        ZELResult res = ZEL_OK;
+        ZELContext *ctx = zelOpenMemory(data, size, &res);
+        assert(ctx && res == ZEL_OK);
+        uint8_t buf[8];
+        res = zelDecodeFrameIndex8(ctx, 0, buf, 4);
+        assert(res == ZEL_OK);
+        res = zelDecodeFrameIndex8Zone(ctx, 0, 0, buf);
+        assert(res == ZEL_OK);
+        zelClose(ctx);
+    }
+
+    free(data);
+}
+
 /* === Tests with binary data === */
 
 static void test_open_and_basic_getters_binary(void) {
@@ -810,6 +916,10 @@ int main(void) {
     test_palette_endianness_controls();
     test_zone_decoders();
     test_timeline_helpers();
+    test_invalid_headers_and_sizes();
+    test_corrupt_zone_chunks();
+    test_zone_index_out_of_bounds();
+    test_stress_open_close_decode();
     test_open_and_basic_getters_binary();
     test_palette_and_decode_index8_binary();
     test_decode_rgb565_binary();
