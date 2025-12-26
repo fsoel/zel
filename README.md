@@ -10,13 +10,18 @@ The format is flexible and allows for various compression methods, including unc
 
 ## Build
 
-The project uses `make` together with `gcc` to build a static library. Run `make` to produce `build/libzel.a`.
+The project uses `make` together with `gcc` to build a static library.
+Run `make` to produce `build/libzel.a`.
+Run `make amalgamate` or `make single` to produce a single-file `build/zel.c`.
+To clean build artifacts, run `make clean`.
 
 ```
 make
 make clean
 make lint
 make format
+make amalgamate
+make single
 ```
 
 ## Usage
@@ -25,7 +30,7 @@ Include the main header in your source files:
 ```c
 #include "zel/zel.h"
 ```
-Link against the static library `libzel.a` when compiling your application.
+Link against the static library `libzel.a` when compiling your application or include the amalgamated source file `zel.c` directly in your project.
 
 ## Tools
 
