@@ -8,10 +8,16 @@ CLANG_FORMAT ?= clang-format
 SCAN_BUILD ?= scan-build
 SCAN_FLAGS ?= --status-bugs
 SCAN_EXCLUDES ?= --exclude 'lib/*'
+MSVC_OUTDIR ?= build/msvc
+MSVC_RSP ?= $(MSVC_OUTDIR)/sources.rsp
+MSVC_CL ?= cl
+MSVC_LIB ?= lib
+MSVC_CLFLAGS ?= /nologo /std:c11 /W4 /O2 /Iinclude
 MKDIR_P ?= mkdir -p
 RM := rm -rf
 
 SRC := $(wildcard src/*.c) $(wildcard lib/lz4/*.c)
+SRC_WIN := $(subst /,\\,$(SRC))
 AMALG := build/zel.c
 AMALG_PARTS := $(wildcard src/*.c) $(wildcard lib/lz4/*.c)
 AMALG_HEADERS := src/zel_internal.h include/lz4/lz4.h
@@ -25,7 +31,7 @@ TEST_BIN := $(patsubst tests/%.c,build/tests/%,$(TEST_SRC))
 HEADERS := $(call rwildcard,include/,*.h) $(call rwildcard,tests/,*.h) src/zel_internal.h
 FMT_FILES := $(sort $(SRC) $(HEADERS) $(TEST_SRC))
 
-.PHONY: all clean test lint format scan dirs amalgamate single
+.PHONY: all clean test lint format scan msvc dirs amalgamate single
 
 all: $(LIB)
 
@@ -77,6 +83,18 @@ endif
 
 scan:
 	@$(SCAN_BUILD) $(SCAN_FLAGS) $(SCAN_EXCLUDES) $(MAKE) clean all
+
+msvc:
+	@$(MKDIR_P) $(MSVC_OUTDIR)
+	@printf "%s\n" $(SRC_WIN) > $(MSVC_RSP)
+	@powershell -NoLogo -NoProfile -Command \
+		"\$$vsPath = & \"C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe\" -latest -property installationPath; \
+		if (\$$vsPath) { \
+			Import-Module \"\$$vsPath\\Common7\\Tools\\Microsoft.VisualStudio.DevShell.dll\"; \
+			Enter-VsDevShell -VsInstallPath \$$vsPath -SkipAutomaticLocation -Arch amd64 -ErrorAction SilentlyContinue; \
+		} \
+		$(MSVC_CL) $(MSVC_CLFLAGS) /Fo$(MSVC_OUTDIR)\\ /c @$(MSVC_RSP); \
+		$(MSVC_LIB) /nologo /OUT:$(MSVC_OUTDIR)\\zel.lib $(MSVC_OUTDIR)\\*.obj;"
 
 amalgamate: $(AMALG)
 single: $(AMALG)
