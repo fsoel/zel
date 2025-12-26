@@ -121,26 +121,32 @@ ZELResult zelGetFramePalette(const ZELContext *ctx,
     if (!zelRangeFits(frameOffset, sizeof(ZELFrameHeader), ctx->size))
         return ZEL_ERR_CORRUPT_DATA;
 
-    ZELFrameHeader fh;
-    ZELResult result = zelReadAt(ctx, frameOffset, &fh, sizeof(ZELFrameHeader));
+    uint8_t fhRaw[ZEL_FRAME_HEADER_DISK_SIZE];
+    ZELResult result = zelReadAt(ctx, frameOffset, fhRaw, ZEL_FRAME_HEADER_DISK_SIZE);
     if (result != ZEL_OK)
         return result;
+
+    ZELFrameHeader fh;
+    zelParseFrameHeader(fhRaw, &fh);
 
     if (fh.localPaletteEntryCount == 0)
         return ZEL_ERR_CORRUPT_DATA;
 
     size_t phOffset = frameOffset + fh.headerSize;
-    if (phOffset > frameEnd || !zelRangeFits(phOffset, sizeof(ZELPaletteHeader), ctx->size)
-        || sizeof(ZELPaletteHeader) > frameEnd - phOffset) {
+    if (phOffset > frameEnd || !zelRangeFits(phOffset, ZEL_PALETTE_HEADER_DISK_SIZE, ctx->size)
+        || ZEL_PALETTE_HEADER_DISK_SIZE > frameEnd - phOffset) {
         return ZEL_ERR_CORRUPT_DATA;
     }
 
-    ZELPaletteHeader ph;
-    result = zelReadAt(ctx, phOffset, &ph, sizeof(ZELPaletteHeader));
+    uint8_t phRaw[ZEL_PALETTE_HEADER_DISK_SIZE];
+    result = zelReadAt(ctx, phOffset, phRaw, ZEL_PALETTE_HEADER_DISK_SIZE);
     if (result != ZEL_OK)
         return result;
 
-    if (ph.headerSize < sizeof(ZELPaletteHeader))
+    ZELPaletteHeader ph;
+    zelParsePaletteHeader(phRaw, &ph);
+
+    if (ph.headerSize < ZEL_PALETTE_HEADER_DISK_SIZE)
         return ZEL_ERR_CORRUPT_DATA;
 
     if (!zelIsValidColorEncoding(ph.colorEncoding))

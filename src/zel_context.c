@@ -122,13 +122,16 @@ static ZELResult zelInitializeContext(ZELContext *ctx) {
     if (!ctx)
         return ZEL_ERR_INVALID_ARGUMENT;
 
-    if (ctx->size < sizeof(ZELFileHeader))
+    if (ctx->size < ZEL_FILE_HEADER_DISK_SIZE)
         return ZEL_ERR_INVALID_ARGUMENT;
 
-    ZELFileHeader tmpHeader;
-    ZELResult result = zelReadAt(ctx, 0, &tmpHeader, sizeof(ZELFileHeader));
+    uint8_t rawHeader[ZEL_FILE_HEADER_DISK_SIZE];
+    ZELResult result = zelReadAt(ctx, 0, rawHeader, ZEL_FILE_HEADER_DISK_SIZE);
     if (result != ZEL_OK)
         return result;
+
+    ZELFileHeader tmpHeader;
+    zelParseFileHeader(rawHeader, &tmpHeader);
 
     if (!zelValidateHeader(&tmpHeader))
         return ZEL_ERR_INVALID_MAGIC;
@@ -191,24 +194,37 @@ static ZELResult zelInitializeContext(ZELContext *ctx) {
     if (!ctx->header.flags.hasFrameIndexTable)
         return ZEL_ERR_UNSUPPORTED_FORMAT;
 
-    size_t indexBytes = (size_t)ctx->header.frameCount * sizeof(ZELFrameIndexEntry);
+    size_t indexBytes = (size_t)ctx->header.frameCount * ZEL_FRAME_INDEX_ENTRY_DISK_SIZE;
     if (!zelRangeFits(offset, indexBytes, ctx->size))
         return ZEL_ERR_CORRUPT_DATA;
 
+    ZELFrameIndexEntry *entries = (ZELFrameIndexEntry *)malloc((size_t)ctx->header.frameCount * sizeof(ZELFrameIndexEntry));
+    if (!entries)
+        return ZEL_ERR_OUT_OF_MEMORY;
+
     if (ctx->data) {
-        ctx->frameIndexTable = (const ZELFrameIndexEntry *)(ctx->data + offset);
+        const uint8_t *src = ctx->data + offset;
+        for (uint32_t i = 0; i < ctx->header.frameCount; ++i)
+            zelParseFrameIndexEntry(src + i * ZEL_FRAME_INDEX_ENTRY_DISK_SIZE, &entries[i]);
     } else {
-        ZELFrameIndexEntry *entries = (ZELFrameIndexEntry *)malloc(indexBytes);
-        if (!entries)
+        uint8_t *raw = (uint8_t *)malloc(indexBytes);
+        if (!raw) {
+            free(entries);
             return ZEL_ERR_OUT_OF_MEMORY;
-        result = zelReadAt(ctx, offset, entries, indexBytes);
+        }
+        result = zelReadAt(ctx, offset, raw, indexBytes);
         if (result != ZEL_OK) {
+            free(raw);
             free(entries);
             return result;
         }
-        ctx->frameIndexTable = entries;
-        ctx->frameIndexOwned = entries;
+        for (uint32_t i = 0; i < ctx->header.frameCount; ++i)
+            zelParseFrameIndexEntry(raw + i * ZEL_FRAME_INDEX_ENTRY_DISK_SIZE, &entries[i]);
+        free(raw);
     }
+
+    ctx->frameIndexTable = entries;
+    ctx->frameIndexOwned = entries;
 
     return ZEL_OK;
 }

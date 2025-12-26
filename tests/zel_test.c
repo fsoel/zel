@@ -10,6 +10,18 @@ static uint16_t swap_u16(uint16_t v) {
     return (uint16_t)(((v & 0x00FFu) << 8) | ((v & 0xFF00u) >> 8));
 }
 
+static void write_le16(uint8_t *dst, uint16_t v) {
+    dst[0] = (uint8_t)(v & 0xFFu);
+    dst[1] = (uint8_t)(v >> 8);
+}
+
+static void write_le32(uint8_t *dst, uint32_t v) {
+    dst[0] = (uint8_t)(v & 0xFFu);
+    dst[1] = (uint8_t)((v >> 8) & 0xFFu);
+    dst[2] = (uint8_t)((v >> 16) & 0xFFu);
+    dst[3] = (uint8_t)((v >> 24) & 0xFFu);
+}
+
 typedef struct {
     const uint8_t *data;
     size_t size;
@@ -135,66 +147,62 @@ static uint8_t *buildSimpleZelSingleFrameWithZonesCustom(uint16_t zoneWidth,
     assert(width % zoneWidth == 0);
     assert(height % zoneHeight == 0);
 
-    ZELFileHeader fh;
-    memset(&fh, 0, sizeof(fh));
-    memcpy(fh.magic, "ZEL0", 4);
-    fh.version = 1;
-    fh.headerSize = sizeof(ZELFileHeader);
-    fh.width = width;
-    fh.height = height;
-    fh.zoneWidth = zoneWidth;
-    fh.zoneHeight = zoneHeight;
-    fh.colorFormat = ZEL_COLOR_FORMAT_INDEXED8;
-    fh.flags.hasGlobalPalette = 1;
-    fh.flags.hasFrameLocalPalettes = 0;
-    fh.flags.hasFrameIndexTable = 1;
-    fh.frameCount = 1;
-    fh.defaultFrameDuration = 16;
+    const size_t fileHeaderSize = ZEL_FILE_HEADER_DISK_SIZE;
+    const size_t paletteHeaderSize = ZEL_PALETTE_HEADER_DISK_SIZE;
+    const size_t frameHeaderSize = ZEL_FRAME_HEADER_DISK_SIZE;
+    const size_t frameIndexEntrySize = ZEL_FRAME_INDEX_ENTRY_DISK_SIZE;
 
-    ZELPaletteHeader ph;
-    memset(&ph, 0, sizeof(ph));
-    ph.type = ZEL_PALETTE_TYPE_GLOBAL;
-    ph.headerSize = sizeof(ZELPaletteHeader);
-    ph.entryCount = paletteEntryCount;
-    ph.colorEncoding = paletteEncoding;
+    uint8_t fh[ZEL_FILE_HEADER_DISK_SIZE];
+    memset(fh, 0, sizeof(fh));
+    memcpy(fh, "ZEL0", 4);
+    write_le16(fh + 4, 1);
+    write_le16(fh + 6, (uint16_t)fileHeaderSize);
+    write_le16(fh + 8, width);
+    write_le16(fh + 0x0A, height);
+    write_le16(fh + 0x0C, zoneWidth);
+    write_le16(fh + 0x0E, zoneHeight);
+    fh[0x10] = ZEL_COLOR_FORMAT_INDEXED8;
+    fh[0x11] = 0x01u /* hasGlobalPalette */ | 0x04u /* hasFrameIndexTable */;
+    write_le32(fh + 0x12, 1);
+    write_le16(fh + 0x16, 16);
 
-    ZELFrameHeader frh;
-    memset(&frh, 0, sizeof(frh));
-    frh.blockType = 1;
-    frh.headerSize = sizeof(ZELFrameHeader);
-    frh.flags.keyframe = 1;
-    frh.compressionType = ZEL_COMPRESSION_NONE;
-    frh.localPaletteEntryCount = 0;
+    uint8_t ph[ZEL_PALETTE_HEADER_DISK_SIZE];
+    memset(ph, 0, sizeof(ph));
+    ph[0] = ZEL_PALETTE_TYPE_GLOBAL;
+    ph[1] = (uint8_t)paletteHeaderSize;
+    write_le16(ph + 2, paletteEntryCount);
+    ph[4] = (uint8_t)paletteEncoding;
+
+    uint8_t frh[ZEL_FRAME_HEADER_DISK_SIZE];
+    memset(frh, 0, sizeof(frh));
+    frh[0] = 1; /* blockType */
+    frh[1] = (uint8_t)frameHeaderSize;
+    frh[2] = 0x01u; /* keyframe */
+    frh[5] = ZEL_COMPRESSION_NONE;
+    write_le16(frh + 6, 0); /* referenceFrameIndex */
+    write_le16(frh + 8, 0); /* localPaletteEntryCount */
 
     uint8_t pixels[PIXEL_COUNT] = {0, 1, 0, 1, 1, 0, 1, 0};
-    const uint32_t zoneCount = (width / fh.zoneWidth) * (height / fh.zoneHeight);
-    frh.zoneCount = (uint16_t)zoneCount;
+    const uint32_t zoneCount = (width / zoneWidth) * (height / zoneHeight);
+    write_le16(frh + 3, (uint16_t)zoneCount);
 
-    const size_t zoneBytes = (size_t)fh.zoneWidth * fh.zoneHeight;
-    const size_t frameBlockSize =
-            sizeof(ZELFrameHeader) + zoneCount * (sizeof(uint32_t) + zoneBytes);
-
-    ZELFrameIndexEntry fie;
-    memset(&fie, 0, sizeof(fie));
-    fie.flags.keyframe = 1;
-    fie.frameDuration = 16;
-    fie.frameSize = (uint32_t)frameBlockSize;
+    const size_t zoneBytes = (size_t)zoneWidth * zoneHeight;
+    const size_t frameBlockSize = frameHeaderSize + zoneCount * (sizeof(uint32_t) + zoneBytes);
 
     const size_t paletteBytes = (size_t)paletteEntryCount * sizeof(uint16_t);
 
-    size_t size = sizeof(ZELFileHeader) + sizeof(ZELPaletteHeader) + paletteBytes
-                  + sizeof(ZELFrameIndexEntry) + frameBlockSize;
+    size_t size = fileHeaderSize + paletteHeaderSize + paletteBytes + frameIndexEntrySize + frameBlockSize;
 
     uint8_t *buf = (uint8_t *)malloc(size);
     assert(buf);
 
     size_t off = 0;
 
-    memcpy(buf + off, &fh, sizeof(fh));
-    off += sizeof(fh);
+    memcpy(buf + off, fh, fileHeaderSize);
+    off += fileHeaderSize;
 
-    memcpy(buf + off, &ph, sizeof(ph));
-    off += sizeof(ph);
+    memcpy(buf + off, ph, paletteHeaderSize);
+    off += paletteHeaderSize;
 
     uint8_t *paletteBytesBuf = (uint8_t *)malloc(paletteBytes);
     assert(paletteBytesBuf);
@@ -204,18 +212,23 @@ static uint8_t *buildSimpleZelSingleFrameWithZonesCustom(uint16_t zoneWidth,
     free(paletteBytesBuf);
 
     size_t frameIndexTableOffset = off;
-    off += sizeof(fie);
+    off += frameIndexEntrySize;
 
     size_t frameOffset = off;
-    memcpy(buf + off, &frh, sizeof(frh));
-    off += sizeof(frh);
+    memcpy(buf + off, frh, frameHeaderSize);
+    off += frameHeaderSize;
 
     uint8_t zoneScratch[PIXEL_COUNT];
-    write_zone_chunks(buf, &off, pixels, width, height, fh.zoneWidth, fh.zoneHeight, zoneScratch);
+    write_zone_chunks(buf, &off, pixels, width, height, zoneWidth, zoneHeight, zoneScratch);
 
-    fie.frameOffset = (uint32_t)frameOffset;
+    uint8_t fie[ZEL_FRAME_INDEX_ENTRY_DISK_SIZE];
+    memset(fie, 0, sizeof(fie));
+    write_le32(fie + 0, (uint32_t)frameOffset);
+    write_le32(fie + 4, (uint32_t)frameBlockSize);
+    fie[8] = 0x01u; /* keyframe */
+    write_le16(fie + 9, 16);
 
-    memcpy(buf + frameIndexTableOffset, &fie, sizeof(fie));
+    memcpy(buf + frameIndexTableOffset, fie, frameIndexEntrySize);
 
     assert(off == size);
 
@@ -257,57 +270,61 @@ static uint8_t *buildSimpleZelThreeFrames(size_t *outSize) {
     const uint16_t width = WIDTH;
     const uint16_t height = HEIGHT;
 
-    ZELFileHeader fh;
-    memset(&fh, 0, sizeof(fh));
-    memcpy(fh.magic, "ZEL0", 4);
-    fh.version = 1;
-    fh.headerSize = sizeof(ZELFileHeader);
-    fh.width = width;
-    fh.height = height;
-    fh.zoneWidth = width;
-    fh.zoneHeight = height;
-    fh.colorFormat = ZEL_COLOR_FORMAT_INDEXED8;
-    fh.flags.hasGlobalPalette = 1;
-    fh.flags.hasFrameLocalPalettes = 0;
-    fh.flags.hasFrameIndexTable = 1;
-    fh.frameCount = 3;
-    fh.defaultFrameDuration = 0;
+    const size_t fileHeaderSize = ZEL_FILE_HEADER_DISK_SIZE;
+    const size_t paletteHeaderSize = ZEL_PALETTE_HEADER_DISK_SIZE;
+    const size_t frameHeaderSize = ZEL_FRAME_HEADER_DISK_SIZE;
+    const size_t frameIndexEntrySize = ZEL_FRAME_INDEX_ENTRY_DISK_SIZE;
 
-    ZELPaletteHeader ph;
-    memset(&ph, 0, sizeof(ph));
-    ph.type = ZEL_PALETTE_TYPE_GLOBAL;
-    ph.headerSize = sizeof(ZELPaletteHeader);
-    ph.entryCount = 2;
-    ph.colorEncoding = ZEL_COLOR_RGB565_LE;
+    uint8_t fh[ZEL_FILE_HEADER_DISK_SIZE];
+    memset(fh, 0, sizeof(fh));
+    memcpy(fh, "ZEL0", 4);
+    write_le16(fh + 4, 1);
+    write_le16(fh + 6, (uint16_t)fileHeaderSize);
+    write_le16(fh + 8, width);
+    write_le16(fh + 0x0A, height);
+    write_le16(fh + 0x0C, width);
+    write_le16(fh + 0x0E, height);
+    fh[0x10] = ZEL_COLOR_FORMAT_INDEXED8;
+    fh[0x11] = 0x01u /* hasGlobalPalette */ | 0x04u /* hasFrameIndexTable */;
+    write_le32(fh + 0x12, 3);
+    write_le16(fh + 0x16, 0);
+
+    uint8_t ph[ZEL_PALETTE_HEADER_DISK_SIZE];
+    memset(ph, 0, sizeof(ph));
+    ph[0] = ZEL_PALETTE_TYPE_GLOBAL;
+    ph[1] = (uint8_t)paletteHeaderSize;
+    write_le16(ph + 2, 2);
+    ph[4] = ZEL_COLOR_RGB565_LE;
 
     uint16_t palette[2] = {0x0000, 0xFFFF};
 
-    ZELFrameIndexEntry fie[3];
+    uint8_t fie[3][ZEL_FRAME_INDEX_ENTRY_DISK_SIZE];
     memset(fie, 0, sizeof(fie));
 
-    fie[0].flags.keyframe = 1;
-    fie[0].frameDuration = 10;
-    fie[1].flags.keyframe = 1;
-    fie[1].frameDuration = 20;
-    fie[2].flags.keyframe = 1;
-    fie[2].frameDuration = 30;
+    fie[0][8] = 0x01u;
+    write_le16(fie[0] + 9, 10);
+    fie[1][8] = 0x01u;
+    write_le16(fie[1] + 9, 20);
+    fie[2][8] = 0x01u;
+    write_le16(fie[2] + 9, 30);
 
-    ZELFrameHeader frh;
-    memset(&frh, 0, sizeof(frh));
-    frh.blockType = 1;
-    frh.headerSize = sizeof(ZELFrameHeader);
-    frh.flags.keyframe = 1;
-    frh.compressionType = ZEL_COMPRESSION_NONE;
-    frh.localPaletteEntryCount = 0;
+    uint8_t frh[ZEL_FRAME_HEADER_DISK_SIZE];
+    memset(frh, 0, sizeof(frh));
+    frh[0] = 1; /* blockType */
+    frh[1] = (uint8_t)frameHeaderSize;
+    frh[2] = 0x01u; /* keyframe */
+    frh[5] = ZEL_COMPRESSION_NONE;
+    write_le16(frh + 6, 0);
+    write_le16(frh + 8, 0);
 
     uint8_t pixels[PIXEL_COUNT] = {0, 1};
-    const uint32_t zoneCount = (width / fh.zoneWidth) * (height / fh.zoneHeight);
-    frh.zoneCount = (uint16_t)zoneCount;
+    const uint32_t zoneCount = (width / width) * (height / height);
+    write_le16(frh + 3, (uint16_t)zoneCount);
 
-    const size_t zoneBytes = (size_t)fh.zoneWidth * fh.zoneHeight;
-    size_t oneFrameBlockSize = sizeof(ZELFrameHeader) + zoneCount * (sizeof(uint32_t) + zoneBytes);
+    const size_t zoneBytes = (size_t)width * height;
+    size_t oneFrameBlockSize = frameHeaderSize + zoneCount * (sizeof(uint32_t) + zoneBytes);
 
-    size_t size = sizeof(ZELFileHeader) + sizeof(ZELPaletteHeader) + sizeof(palette) + sizeof(fie)
+    size_t size = fileHeaderSize + paletteHeaderSize + sizeof(palette) + (frameIndexEntrySize * 3)
                   + 3 * oneFrameBlockSize;
 
     uint8_t *buf = (uint8_t *)malloc(size);
@@ -315,44 +332,44 @@ static uint8_t *buildSimpleZelThreeFrames(size_t *outSize) {
 
     size_t off = 0;
 
-    memcpy(buf + off, &fh, sizeof(fh));
-    off += sizeof(fh);
+    memcpy(buf + off, fh, fileHeaderSize);
+    off += fileHeaderSize;
 
-    memcpy(buf + off, &ph, sizeof(ph));
-    off += sizeof(ph);
+    memcpy(buf + off, ph, paletteHeaderSize);
+    off += paletteHeaderSize;
 
     memcpy(buf + off, palette, sizeof(palette));
     off += sizeof(palette);
 
     size_t frameIndexTableOffset = off;
-    off += sizeof(fie);
+    off += frameIndexEntrySize * 3;
 
     uint8_t zoneScratch[PIXEL_COUNT];
 
     size_t frame0Offset = off;
-    memcpy(buf + off, &frh, sizeof(frh));
-    off += sizeof(frh);
-    write_zone_chunks(buf, &off, pixels, width, height, fh.zoneWidth, fh.zoneHeight, zoneScratch);
+    memcpy(buf + off, frh, frameHeaderSize);
+    off += frameHeaderSize;
+    write_zone_chunks(buf, &off, pixels, width, height, width, height, zoneScratch);
 
     size_t frame1Offset = off;
-    memcpy(buf + off, &frh, sizeof(frh));
-    off += sizeof(frh);
-    write_zone_chunks(buf, &off, pixels, width, height, fh.zoneWidth, fh.zoneHeight, zoneScratch);
+    memcpy(buf + off, frh, frameHeaderSize);
+    off += frameHeaderSize;
+    write_zone_chunks(buf, &off, pixels, width, height, width, height, zoneScratch);
 
     size_t frame2Offset = off;
-    memcpy(buf + off, &frh, sizeof(frh));
-    off += sizeof(frh);
-    write_zone_chunks(buf, &off, pixels, width, height, fh.zoneWidth, fh.zoneHeight, zoneScratch);
+    memcpy(buf + off, frh, frameHeaderSize);
+    off += frameHeaderSize;
+    write_zone_chunks(buf, &off, pixels, width, height, width, height, zoneScratch);
 
-    fie[0].frameOffset = (uint32_t)frame0Offset;
-    fie[1].frameOffset = (uint32_t)frame1Offset;
-    fie[2].frameOffset = (uint32_t)frame2Offset;
+    write_le32(fie[0] + 0, (uint32_t)frame0Offset);
+    write_le32(fie[1] + 0, (uint32_t)frame1Offset);
+    write_le32(fie[2] + 0, (uint32_t)frame2Offset);
 
-    fie[0].frameSize = (uint32_t)oneFrameBlockSize;
-    fie[1].frameSize = (uint32_t)oneFrameBlockSize;
-    fie[2].frameSize = (uint32_t)oneFrameBlockSize;
+    write_le32(fie[0] + 4, (uint32_t)oneFrameBlockSize);
+    write_le32(fie[1] + 4, (uint32_t)oneFrameBlockSize);
+    write_le32(fie[2] + 4, (uint32_t)oneFrameBlockSize);
 
-    memcpy(buf + frameIndexTableOffset, fie, sizeof(fie));
+    memcpy(buf + frameIndexTableOffset, fie, frameIndexEntrySize * 3);
 
     assert(off == size);
     if (outSize)

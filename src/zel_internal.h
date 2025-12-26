@@ -6,6 +6,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+static inline uint16_t zelLe16(const uint8_t *p) {
+    return (uint16_t)(p[0] | ((uint16_t)p[1] << 8));
+}
+
+static inline uint32_t zelLe32(const uint8_t *p) {
+    return (uint32_t)(p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24));
+}
+
 typedef struct {
     uint16_t zoneWidth;
     uint16_t zoneHeight;
@@ -61,5 +69,9 @@ ZELResult zelReadAt(const ZELContext *ctx, size_t offset, void *dst, size_t leng
 uint8_t *zelAcquireZoneScratch(const ZELContext *ctx, size_t neededBytes);
 uint16_t *zelAcquirePaletteScratch(const ZELContext *ctx, size_t neededEntries);
 ZELColorEncoding zelSelectOutputEncoding(const ZELContext *ctx, ZELColorEncoding sourceEncoding);
+void zelParseFileHeader(const uint8_t *src, ZELFileHeader *out);
+void zelParsePaletteHeader(const uint8_t *src, ZELPaletteHeader *out);
+void zelParseFrameHeader(const uint8_t *src, ZELFrameHeader *out);
+void zelParseFrameIndexEntry(const uint8_t *src, ZELFrameIndexEntry *out);
 
 #endif /* ZEL_INTERNAL_H */

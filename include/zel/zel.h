@@ -8,7 +8,10 @@
 extern "C" {
 #endif
 
-#pragma pack(push, 1)
+#define ZEL_FILE_HEADER_DISK_SIZE 34
+#define ZEL_PALETTE_HEADER_DISK_SIZE 8
+#define ZEL_FRAME_INDEX_ENTRY_DISK_SIZE 11
+#define ZEL_FRAME_HEADER_DISK_SIZE 14
 
 /* Enums */
 
@@ -93,8 +96,6 @@ typedef struct {
     uint8_t colorEncoding; /* ZELColorEncoding */
     uint8_t reserved[3];
 } ZELPaletteHeader;
-
-#pragma pack(pop)
 
 typedef struct ZELContext ZELContext;
 

@@ -90,30 +90,31 @@ static ZELResult zelInitFrameZoneStream(const ZELContext *ctx,
         frameBytes = mutableCtx->frameDataScratch;
     }
 
-    if (frameSize < sizeof(ZELFrameHeader))
+    if (frameSize < ZEL_FRAME_HEADER_DISK_SIZE)
         return ZEL_ERR_CORRUPT_DATA;
 
     ZELFrameHeader fh;
-    memcpy(&fh, frameBytes, sizeof(ZELFrameHeader));
+    zelParseFrameHeader(frameBytes, &fh);
 
-    if (fh.headerSize < sizeof(ZELFrameHeader) || fh.headerSize > frameSize)
+    if (fh.headerSize < ZEL_FRAME_HEADER_DISK_SIZE || fh.headerSize > frameSize)
         return ZEL_ERR_CORRUPT_DATA;
 
     size_t relOffset = fh.headerSize;
 
     if (fh.flags.hasLocalPalette) {
-        if (frameSize - relOffset < sizeof(ZELPaletteHeader))
+        if (frameSize - relOffset < ZEL_PALETTE_HEADER_DISK_SIZE)
             return ZEL_ERR_CORRUPT_DATA;
 
-        const ZELPaletteHeader *ph = (const ZELPaletteHeader *)(frameBytes + relOffset);
-        if (ph->headerSize < sizeof(ZELPaletteHeader) || ph->entryCount == 0)
+        ZELPaletteHeader ph;
+        zelParsePaletteHeader(frameBytes + relOffset, &ph);
+        if (ph.headerSize < ZEL_PALETTE_HEADER_DISK_SIZE || ph.entryCount == 0)
             return ZEL_ERR_CORRUPT_DATA;
 
-        if (ph->headerSize > frameSize - relOffset)
+        if (ph.headerSize > frameSize - relOffset)
             return ZEL_ERR_CORRUPT_DATA;
 
-        size_t paletteDataRel = relOffset + ph->headerSize;
-        size_t paletteBytes = (size_t)ph->entryCount * sizeof(uint16_t);
+        size_t paletteDataRel = relOffset + ph.headerSize;
+        size_t paletteBytes = (size_t)ph.entryCount * sizeof(uint16_t);
 
         if (paletteBytes > frameSize - paletteDataRel)
             return ZEL_ERR_CORRUPT_DATA;
