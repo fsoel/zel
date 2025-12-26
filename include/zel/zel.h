@@ -98,7 +98,18 @@ typedef struct {
 
 typedef struct ZELContext ZELContext;
 
+typedef size_t (*ZELStreamReadFunc)(void *userData, size_t offset, void *dst, size_t size);
+typedef void (*ZELStreamCloseFunc)(void *userData);
+
+typedef struct {
+    ZELStreamReadFunc read;
+    ZELStreamCloseFunc close;
+    void *userData;
+    size_t size;
+} ZELInputStream;
+
 ZELContext *zelOpenMemory(const uint8_t *data, size_t size, ZELResult *outResult);
+ZELContext *zelOpenStream(const ZELInputStream *stream, ZELResult *outResult);
 
 void zelClose(ZELContext *ctx);
 

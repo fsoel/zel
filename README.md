@@ -1,4 +1,4 @@
-# zel
+# ZEL
 
 ZEL is a C library that targets microcontrollers with a speed-optimised format for animated images. It provides functionality to decode and render animated images with low memory footprint and high performance, making it suitable for resource-constrained environments.
 

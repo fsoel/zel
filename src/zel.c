@@ -10,10 +10,14 @@ struct ZELContext {
     const uint8_t *data;
     size_t size;
 
+    ZELInputStream stream;
+
     ZELFileHeader header;
 
     const ZELFrameIndexEntry *frameIndexTable;
+    ZELFrameIndexEntry *frameIndexOwned;
     const uint16_t *globalPaletteRaw;
+    uint16_t *globalPaletteOwned;
     uint16_t *globalPaletteConverted;
     size_t globalPaletteConvertedCapacity;
     uint16_t globalPaletteCount;
@@ -25,6 +29,8 @@ struct ZELContext {
 
     uint8_t *zoneScratch;
     size_t zoneScratchCapacity;
+    uint8_t *frameDataScratch;
+    size_t frameDataScratchCapacity;
     uint16_t *paletteScratch;
     size_t paletteScratchCapacity;
 };
@@ -39,13 +45,16 @@ typedef struct {
 } ZELZoneLayout;
 
 typedef struct {
-    const ZELFrameHeader *header;
+    ZELFrameHeader header;
     size_t frameOffset;
     size_t frameSize;
     size_t zoneDataOffset;
     size_t frameDataEnd;
     ZELZoneLayout layout;
+    const uint8_t *frameData;
 } ZELFrameZoneStream;
+
+static int zelValidateHeader(const ZELFileHeader *h);
 
 static int zelIsValidColorEncoding(uint8_t encoding) {
     return encoding == ZEL_COLOR_RGB565_LE || encoding == ZEL_COLOR_RGB565_BE;
@@ -53,6 +62,143 @@ static int zelIsValidColorEncoding(uint8_t encoding) {
 
 static uint16_t zelSwapRgb565(uint16_t value) {
     return (uint16_t)(((value & 0x00FFu) << 8) | ((value & 0xFF00u) >> 8));
+}
+
+static int zelRangeFits(size_t offset, size_t length, size_t limit) {
+    if (length > limit)
+        return 0;
+    return offset <= limit - length;
+}
+
+static ZELResult zelReadAt(const ZELContext *ctx, size_t offset, void *dst, size_t length) {
+    if (!ctx || (!dst && length > 0))
+        return ZEL_ERR_INVALID_ARGUMENT;
+    if (length == 0)
+        return ZEL_OK;
+
+    if (!zelRangeFits(offset, length, ctx->size))
+        return ZEL_ERR_CORRUPT_DATA;
+
+    if (ctx->data) {
+        memcpy(dst, ctx->data + offset, length);
+        return ZEL_OK;
+    }
+
+    if (!ctx->stream.read)
+        return ZEL_ERR_INTERNAL;
+
+    size_t bytesRead = ctx->stream.read(ctx->stream.userData, offset, dst, length);
+    if (bytesRead != length)
+        return ZEL_ERR_IO;
+
+    return ZEL_OK;
+}
+
+static ZELContext *zelCreateContext(void) {
+    ZELContext *ctx = (ZELContext *)malloc(sizeof(ZELContext));
+    if (!ctx)
+        return NULL;
+
+    memset(ctx, 0, sizeof(ZELContext));
+    ctx->globalPaletteEncoding = ZEL_COLOR_RGB565_LE;
+    ctx->globalPaletteConvertedEncoding = (ZELColorEncoding)255;
+    ctx->outputColorEncoding = ZEL_COLOR_RGB565_LE;
+    return ctx;
+}
+
+static ZELResult zelInitializeContext(ZELContext *ctx) {
+    if (!ctx)
+        return ZEL_ERR_INVALID_ARGUMENT;
+
+    if (ctx->size < sizeof(ZELFileHeader))
+        return ZEL_ERR_INVALID_ARGUMENT;
+
+    ZELFileHeader tmpHeader;
+    ZELResult result = zelReadAt(ctx, 0, &tmpHeader, sizeof(ZELFileHeader));
+    if (result != ZEL_OK)
+        return result;
+
+    if (!zelValidateHeader(&tmpHeader))
+        return ZEL_ERR_INVALID_MAGIC;
+
+    if (tmpHeader.headerSize > ctx->size)
+        return ZEL_ERR_CORRUPT_DATA;
+
+    memcpy(&ctx->header, &tmpHeader, sizeof(ZELFileHeader));
+
+    size_t offset = ctx->header.headerSize;
+
+    if (offset > ctx->size)
+        return ZEL_ERR_CORRUPT_DATA;
+
+    if (ctx->header.flags.hasGlobalPalette) {
+        if (!zelRangeFits(offset, sizeof(ZELPaletteHeader), ctx->size))
+            return ZEL_ERR_CORRUPT_DATA;
+
+        ZELPaletteHeader ph;
+        result = zelReadAt(ctx, offset, &ph, sizeof(ZELPaletteHeader));
+        if (result != ZEL_OK)
+            return result;
+
+        if (!zelIsValidColorEncoding(ph.colorEncoding))
+            return ZEL_ERR_UNSUPPORTED_FORMAT;
+
+        if (ph.entryCount == 0)
+            return ZEL_ERR_CORRUPT_DATA;
+
+        size_t paletteDataOffset = offset + ph.headerSize;
+        size_t paletteBytes = (size_t)ph.entryCount * sizeof(uint16_t);
+
+        if (ph.headerSize < sizeof(ZELPaletteHeader))
+            return ZEL_ERR_CORRUPT_DATA;
+
+        if (!zelRangeFits(paletteDataOffset, paletteBytes, ctx->size))
+            return ZEL_ERR_CORRUPT_DATA;
+
+        if (ctx->data) {
+            ctx->globalPaletteRaw = (const uint16_t *)(ctx->data + paletteDataOffset);
+        } else {
+            uint16_t *entries = (uint16_t *)malloc(paletteBytes);
+            if (!entries)
+                return ZEL_ERR_OUT_OF_MEMORY;
+            result = zelReadAt(ctx, paletteDataOffset, entries, paletteBytes);
+            if (result != ZEL_OK) {
+                free(entries);
+                return result;
+            }
+            ctx->globalPaletteRaw = entries;
+            ctx->globalPaletteOwned = entries;
+        }
+
+        ctx->globalPaletteCount = ph.entryCount;
+        ctx->globalPaletteEncoding = (ZELColorEncoding)ph.colorEncoding;
+
+        offset = paletteDataOffset + paletteBytes;
+    }
+
+    if (!ctx->header.flags.hasFrameIndexTable)
+        return ZEL_ERR_UNSUPPORTED_FORMAT;
+
+    size_t indexBytes = (size_t)ctx->header.frameCount * sizeof(ZELFrameIndexEntry);
+    if (!zelRangeFits(offset, indexBytes, ctx->size))
+        return ZEL_ERR_CORRUPT_DATA;
+
+    if (ctx->data) {
+        ctx->frameIndexTable = (const ZELFrameIndexEntry *)(ctx->data + offset);
+    } else {
+        ZELFrameIndexEntry *entries = (ZELFrameIndexEntry *)malloc(indexBytes);
+        if (!entries)
+            return ZEL_ERR_OUT_OF_MEMORY;
+        result = zelReadAt(ctx, offset, entries, indexBytes);
+        if (result != ZEL_OK) {
+            free(entries);
+            return result;
+        }
+        ctx->frameIndexTable = entries;
+        ctx->frameIndexOwned = entries;
+    }
+
+    return ZEL_OK;
 }
 
 static uint8_t *zelAcquireZoneScratch(const ZELContext *ctx, size_t neededBytes) {
@@ -166,49 +312,77 @@ static ZELResult zelInitFrameZoneStream(const ZELContext *ctx,
     size_t frameOffset = fi->frameOffset;
     size_t frameSize = fi->frameSize;
 
-    if (frameSize == 0 || frameOffset + sizeof(ZELFrameHeader) > ctx->size
-        || frameOffset + frameSize > ctx->size) {
+    if (frameSize == 0)
+        return ZEL_ERR_CORRUPT_DATA;
+
+    if (!zelRangeFits(frameOffset, sizeof(ZELFrameHeader), ctx->size)
+        || !zelRangeFits(frameOffset, frameSize, ctx->size)) {
         return ZEL_ERR_CORRUPT_DATA;
     }
 
-    const ZELFrameHeader *fh = (const ZELFrameHeader *)(ctx->data + frameOffset);
-    if (fh->headerSize < sizeof(ZELFrameHeader))
+    const uint8_t *frameBytes = NULL;
+    if (ctx->data) {
+        frameBytes = ctx->data + frameOffset;
+    } else {
+        ZELContext *mutableCtx = (ZELContext *)ctx;
+        if (mutableCtx->frameDataScratchCapacity < frameSize) {
+            uint8_t *newBuf = (uint8_t *)realloc(mutableCtx->frameDataScratch, frameSize);
+            if (!newBuf)
+                return ZEL_ERR_OUT_OF_MEMORY;
+            mutableCtx->frameDataScratch = newBuf;
+            mutableCtx->frameDataScratchCapacity = frameSize;
+        }
+
+        ZELResult result = zelReadAt(ctx, frameOffset, mutableCtx->frameDataScratch, frameSize);
+        if (result != ZEL_OK)
+            return result;
+
+        frameBytes = mutableCtx->frameDataScratch;
+    }
+
+    if (frameSize < sizeof(ZELFrameHeader))
+        return ZEL_ERR_CORRUPT_DATA;
+
+    ZELFrameHeader fh;
+    memcpy(&fh, frameBytes, sizeof(ZELFrameHeader));
+
+    if (fh.headerSize < sizeof(ZELFrameHeader) || fh.headerSize > frameSize)
+        return ZEL_ERR_CORRUPT_DATA;
+
+    size_t relOffset = fh.headerSize;
+
+    if (fh.flags.hasLocalPalette) {
+        if (frameSize - relOffset < sizeof(ZELPaletteHeader))
+            return ZEL_ERR_CORRUPT_DATA;
+
+        const ZELPaletteHeader *ph = (const ZELPaletteHeader *)(frameBytes + relOffset);
+        if (ph->headerSize < sizeof(ZELPaletteHeader) || ph->entryCount == 0)
+            return ZEL_ERR_CORRUPT_DATA;
+
+        if (ph->headerSize > frameSize - relOffset)
+            return ZEL_ERR_CORRUPT_DATA;
+
+        size_t paletteDataRel = relOffset + ph->headerSize;
+        size_t paletteBytes = (size_t)ph->entryCount * sizeof(uint16_t);
+
+        if (paletteBytes > frameSize - paletteDataRel)
+            return ZEL_ERR_CORRUPT_DATA;
+
+        relOffset = paletteDataRel + paletteBytes;
+    }
+
+    if (relOffset > frameSize)
         return ZEL_ERR_CORRUPT_DATA;
 
     size_t frameEnd = frameOffset + frameSize;
-    size_t offset = frameOffset + fh->headerSize;
-    if (offset > frameEnd)
-        return ZEL_ERR_CORRUPT_DATA;
-
-    if (fh->flags.hasLocalPalette) {
-        if (offset + sizeof(ZELPaletteHeader) > ctx->size
-            || offset + sizeof(ZELPaletteHeader) > frameEnd)
-            return ZEL_ERR_CORRUPT_DATA;
-
-        const ZELPaletteHeader *ph = (const ZELPaletteHeader *)(ctx->data + offset);
-        if (ph->headerSize < sizeof(ZELPaletteHeader))
-            return ZEL_ERR_CORRUPT_DATA;
-
-        size_t paletteDataOffset = offset + ph->headerSize;
-        size_t paletteBytes = (size_t)ph->entryCount * sizeof(uint16_t);
-
-        if (paletteDataOffset + paletteBytes > ctx->size
-            || paletteDataOffset + paletteBytes > frameEnd) {
-            return ZEL_ERR_CORRUPT_DATA;
-        }
-
-        offset = paletteDataOffset + paletteBytes;
-    }
-
-    if (offset > frameEnd)
-        return ZEL_ERR_CORRUPT_DATA;
+    size_t offset = frameOffset + relOffset;
 
     ZELZoneLayout layout;
     ZELResult zr = zelComputeZoneLayout(ctx, &layout);
     if (zr != ZEL_OK)
         return zr;
 
-    if (layout.zoneCount == 0 || fh->zoneCount != (uint16_t)layout.zoneCount)
+    if (layout.zoneCount == 0 || fh.zoneCount != (uint16_t)layout.zoneCount)
         return ZEL_ERR_CORRUPT_DATA;
 
     outStream->header = fh;
@@ -217,6 +391,7 @@ static ZELResult zelInitFrameZoneStream(const ZELContext *ctx,
     outStream->zoneDataOffset = offset;
     outStream->frameDataEnd = frameEnd;
     outStream->layout = layout;
+    outStream->frameData = frameBytes;
     return ZEL_OK;
 }
 
@@ -225,22 +400,37 @@ static ZELResult zelReadZoneChunkAtCursor(const ZELContext *ctx,
                                           size_t *cursor,
                                           const uint8_t **outData,
                                           uint32_t *outSize) {
-    if (*cursor + sizeof(uint32_t) > stream->frameDataEnd)
+    if (!ctx || !stream || !cursor || !outData || !outSize)
+        return ZEL_ERR_INVALID_ARGUMENT;
+
+    if (!stream->frameData)
+        return ZEL_ERR_INTERNAL;
+
+    if (*cursor < stream->frameOffset || *cursor > stream->frameDataEnd)
         return ZEL_ERR_CORRUPT_DATA;
 
+    size_t relOffset = *cursor - stream->frameOffset;
+    size_t frameBytesRemaining = stream->frameSize - relOffset;
+    if (frameBytesRemaining < sizeof(uint32_t))
+        return ZEL_ERR_CORRUPT_DATA;
+
+    const uint8_t *frameBytes = stream->frameData;
     uint32_t chunkSize = 0;
-    memcpy(&chunkSize, ctx->data + *cursor, sizeof(uint32_t));
+    memcpy(&chunkSize, frameBytes + relOffset, sizeof(uint32_t));
+
+    relOffset += sizeof(uint32_t);
     *cursor += sizeof(uint32_t);
 
     if (chunkSize == 0)
         return ZEL_ERR_CORRUPT_DATA;
 
-    if (*cursor + chunkSize > stream->frameDataEnd)
+    if (relOffset > stream->frameSize || (size_t)chunkSize > stream->frameSize - relOffset)
         return ZEL_ERR_CORRUPT_DATA;
 
-    *outData = ctx->data + *cursor;
-    *outSize = chunkSize;
+    const uint8_t *chunkData = frameBytes + relOffset;
     *cursor += chunkSize;
+    *outData = chunkData;
+    *outSize = chunkSize;
     return ZEL_OK;
 }
 
@@ -274,7 +464,7 @@ static ZELResult zelAccessZonePixels(const ZELContext *ctx,
     (void)ctx;
     size_t zoneBytes = stream->layout.zonePixelBytes;
 
-    switch (stream->header->compressionType) {
+    switch (stream->header.compressionType) {
         case ZEL_COMPRESSION_NONE:
             if ((size_t)chunkSize != zoneBytes)
                 return ZEL_ERR_CORRUPT_DATA;
@@ -387,122 +577,69 @@ static int zelValidateHeader(const ZELFileHeader *h) {
 ZELContext *zelOpenMemory(const uint8_t *data, size_t size, ZELResult *outResult) {
     ZELResult result = ZEL_OK;
     ZELContext *ctx = NULL;
-    ZELFileHeader tmpHeader;
-    size_t offset;
 
-    if (data == NULL || size < sizeof(ZELFileHeader)) {
+    if (!data || size < sizeof(ZELFileHeader)) {
         result = ZEL_ERR_INVALID_ARGUMENT;
         goto fail;
     }
 
-    memcpy(&tmpHeader, data, sizeof(ZELFileHeader));
-
-    if (!zelValidateHeader(&tmpHeader)) {
-        result = ZEL_ERR_INVALID_MAGIC;
-        goto fail;
-    }
-
-    if (tmpHeader.headerSize > size) {
-        result = ZEL_ERR_CORRUPT_DATA;
-        goto fail;
-    }
-
-    ctx = (ZELContext *)malloc(sizeof(ZELContext));
+    ctx = zelCreateContext();
     if (!ctx) {
         result = ZEL_ERR_OUT_OF_MEMORY;
         goto fail;
     }
 
-    memset(ctx, 0, sizeof(ZELContext));
     ctx->data = data;
     ctx->size = size;
-    memcpy(&ctx->header, &tmpHeader, sizeof(ZELFileHeader));
-    ctx->globalPaletteRaw = NULL;
-    ctx->globalPaletteConverted = NULL;
-    ctx->globalPaletteConvertedCapacity = 0;
-    ctx->globalPaletteEncoding = ZEL_COLOR_RGB565_LE;
-    ctx->globalPaletteConvertedEncoding = (ZELColorEncoding)255;
-    ctx->hasCustomOutputEncoding = 0;
-    ctx->outputColorEncoding = ZEL_COLOR_RGB565_LE;
-    ctx->zoneScratch = NULL;
-    ctx->zoneScratchCapacity = 0;
-    ctx->paletteScratch = NULL;
-    ctx->paletteScratchCapacity = 0;
 
-    offset = ctx->header.headerSize;
-
-    if (offset > size) {
-        result = ZEL_ERR_CORRUPT_DATA;
+    result = zelInitializeContext(ctx);
+    if (result != ZEL_OK)
         goto fail;
-    }
 
-    if (ctx->header.flags.hasGlobalPalette) {
-        if (offset + sizeof(ZELPaletteHeader) > size) {
-            result = ZEL_ERR_CORRUPT_DATA;
-            goto fail;
-        }
-
-        ZELPaletteHeader ph;
-        memcpy(&ph, data + offset, sizeof(ZELPaletteHeader));
-
-        if (!zelIsValidColorEncoding(ph.colorEncoding)) {
-            result = ZEL_ERR_UNSUPPORTED_FORMAT;
-            goto fail;
-        }
-
-        if (ph.entryCount == 0) {
-            result = ZEL_ERR_CORRUPT_DATA;
-            goto fail;
-        }
-
-        size_t paletteDataOffset = offset + ph.headerSize;
-        size_t paletteBytes = (size_t)ph.entryCount * sizeof(uint16_t);
-
-        if (ph.headerSize < sizeof(ZELPaletteHeader)) {
-            result = ZEL_ERR_CORRUPT_DATA;
-            goto fail;
-        }
-
-        if (paletteDataOffset + paletteBytes > size) {
-            result = ZEL_ERR_CORRUPT_DATA;
-            goto fail;
-        }
-
-        ctx->globalPaletteRaw = (const uint16_t *)(data + paletteDataOffset);
-        ctx->globalPaletteCount = ph.entryCount;
-        ctx->globalPaletteEncoding = (ZELColorEncoding)ph.colorEncoding;
-
-        offset = paletteDataOffset + paletteBytes;
-    }
-
-    if (!ctx->header.flags.hasFrameIndexTable) {
-        result = ZEL_ERR_UNSUPPORTED_FORMAT;
-        goto fail;
-    }
-
-    {
-        size_t needed = (size_t)ctx->header.frameCount * sizeof(ZELFrameIndexEntry);
-        if (offset + needed > size) {
-            result = ZEL_ERR_CORRUPT_DATA;
-            goto fail;
-        }
-
-        ctx->frameIndexTable = (const ZELFrameIndexEntry *)(data + offset);
-    }
-
-    if (outResult) {
+    if (outResult)
         *outResult = ZEL_OK;
-    }
     return ctx;
 
 fail:
-    if (ctx) {
+    if (ctx)
         zelClose(ctx);
-        ctx = NULL;
-    }
-    if (outResult) {
+    if (outResult)
         *outResult = result;
+    return NULL;
+}
+
+ZELContext *zelOpenStream(const ZELInputStream *stream, ZELResult *outResult) {
+    ZELResult result = ZEL_OK;
+    ZELContext *ctx = NULL;
+
+    if (!stream || !stream->read || stream->size < sizeof(ZELFileHeader)) {
+        result = ZEL_ERR_INVALID_ARGUMENT;
+        goto fail;
     }
+
+    ctx = zelCreateContext();
+    if (!ctx) {
+        result = ZEL_ERR_OUT_OF_MEMORY;
+        goto fail;
+    }
+
+    ctx->data = NULL;
+    ctx->size = stream->size;
+    ctx->stream = *stream;
+
+    result = zelInitializeContext(ctx);
+    if (result != ZEL_OK)
+        goto fail;
+
+    if (outResult)
+        *outResult = ZEL_OK;
+    return ctx;
+
+fail:
+    if (ctx)
+        zelClose(ctx);
+    if (outResult)
+        *outResult = result;
     return NULL;
 }
 
@@ -511,14 +648,26 @@ void zelClose(ZELContext *ctx) {
         return;
     }
 
+    if (ctx->stream.close)
+        ctx->stream.close(ctx->stream.userData);
+
     if (ctx->globalPaletteConverted)
         free(ctx->globalPaletteConverted);
+
+    if (ctx->globalPaletteOwned)
+        free(ctx->globalPaletteOwned);
 
     if (ctx->zoneScratch)
         free(ctx->zoneScratch);
 
+    if (ctx->frameDataScratch)
+        free(ctx->frameDataScratch);
+
     if (ctx->paletteScratch)
         free(ctx->paletteScratch);
+
+    if (ctx->frameIndexOwned)
+        free(ctx->frameIndexOwned);
 
     free(ctx);
 }
@@ -669,38 +818,70 @@ ZELResult zelGetFramePalette(const ZELContext *ctx,
     if (!fi->flags.hasLocalPalette)
         return zelResolveGlobalPalette(ctx, outEntries, outCount);
 
-    size_t offset = fi->frameOffset;
+    size_t frameOffset = fi->frameOffset;
+    size_t frameSize = fi->frameSize;
 
-    if (offset + sizeof(ZELFrameHeader) > ctx->size)
+    if (frameSize == 0)
         return ZEL_ERR_CORRUPT_DATA;
 
-    const ZELFrameHeader *fh = (const ZELFrameHeader *)(ctx->data + offset);
-
-    if (fh->localPaletteEntryCount == 0)
+    if (!zelRangeFits(frameOffset, frameSize, ctx->size))
         return ZEL_ERR_CORRUPT_DATA;
 
-    size_t phOffset = offset + fh->headerSize;
+    size_t frameEnd = frameOffset + frameSize;
 
-    if (phOffset + sizeof(ZELPaletteHeader) > ctx->size)
+    if (!zelRangeFits(frameOffset, sizeof(ZELFrameHeader), ctx->size))
         return ZEL_ERR_CORRUPT_DATA;
 
-    const ZELPaletteHeader *ph = (const ZELPaletteHeader *)(ctx->data + phOffset);
+    ZELFrameHeader fh;
+    ZELResult result = zelReadAt(ctx, frameOffset, &fh, sizeof(ZELFrameHeader));
+    if (result != ZEL_OK)
+        return result;
 
-    if (ph->headerSize < sizeof(ZELPaletteHeader))
+    if (fh.localPaletteEntryCount == 0)
         return ZEL_ERR_CORRUPT_DATA;
 
-    if (!zelIsValidColorEncoding(ph->colorEncoding))
+    size_t phOffset = frameOffset + fh.headerSize;
+    if (phOffset > frameEnd || !zelRangeFits(phOffset, sizeof(ZELPaletteHeader), ctx->size)
+        || sizeof(ZELPaletteHeader) > frameEnd - phOffset) {
+        return ZEL_ERR_CORRUPT_DATA;
+    }
+
+    ZELPaletteHeader ph;
+    result = zelReadAt(ctx, phOffset, &ph, sizeof(ZELPaletteHeader));
+    if (result != ZEL_OK)
+        return result;
+
+    if (ph.headerSize < sizeof(ZELPaletteHeader))
+        return ZEL_ERR_CORRUPT_DATA;
+
+    if (!zelIsValidColorEncoding(ph.colorEncoding))
         return ZEL_ERR_UNSUPPORTED_FORMAT;
 
-    size_t paletteDataOffset = phOffset + ph->headerSize;
-    size_t paletteBytes = (size_t)ph->entryCount * sizeof(uint16_t);
-
-    if (paletteDataOffset + paletteBytes > ctx->size)
+    if (ph.entryCount == 0)
         return ZEL_ERR_CORRUPT_DATA;
 
-    const uint16_t *paletteData = (const uint16_t *)(ctx->data + paletteDataOffset);
+    size_t paletteDataOffset = phOffset + ph.headerSize;
+    size_t paletteBytes = (size_t)ph.entryCount * sizeof(uint16_t);
 
-    return zelResolveLocalPalette(ctx, ph, paletteData, outEntries, outCount);
+    if (!zelRangeFits(paletteDataOffset, paletteBytes, ctx->size))
+        return ZEL_ERR_CORRUPT_DATA;
+    if (paletteDataOffset > frameEnd || paletteBytes > frameEnd - paletteDataOffset)
+        return ZEL_ERR_CORRUPT_DATA;
+
+    const uint16_t *paletteData = NULL;
+    if (ctx->data) {
+        paletteData = (const uint16_t *)(ctx->data + paletteDataOffset);
+    } else {
+        uint16_t *scratch = zelAcquirePaletteScratch(ctx, ph.entryCount);
+        if (!scratch)
+            return ZEL_ERR_OUT_OF_MEMORY;
+        result = zelReadAt(ctx, paletteDataOffset, scratch, paletteBytes);
+        if (result != ZEL_OK)
+            return result;
+        paletteData = scratch;
+    }
+
+    return zelResolveLocalPalette(ctx, &ph, paletteData, outEntries, outCount);
 }
 
 ZELResult zelGetFrameDurationMs(const ZELContext *ctx,
@@ -774,7 +955,7 @@ ZELResult zelDecodeFrameIndex8(const ZELContext *ctx,
         return result;
 
     uint8_t *scratch = NULL;
-    if (stream.header->compressionType == ZEL_COMPRESSION_LZ4) {
+    if (stream.header.compressionType == ZEL_COMPRESSION_LZ4) {
         scratch = zelAcquireZoneScratch(ctx, stream.layout.zonePixelBytes);
         if (!scratch)
             return ZEL_ERR_OUT_OF_MEMORY;
@@ -821,7 +1002,7 @@ ZELResult zelDecodeFrameIndex8Zone(const ZELContext *ctx,
         return ZEL_ERR_OUT_OF_BOUNDS;
 
     uint8_t *scratch = NULL;
-    if (stream.header->compressionType == ZEL_COMPRESSION_LZ4) {
+    if (stream.header.compressionType == ZEL_COMPRESSION_LZ4) {
         scratch = zelAcquireZoneScratch(ctx, stream.layout.zonePixelBytes);
         if (!scratch)
             return ZEL_ERR_OUT_OF_MEMORY;
@@ -870,7 +1051,7 @@ ZELResult zelDecodeFrameRgb565(const ZELContext *ctx,
         return result;
 
     uint8_t *scratch = NULL;
-    if (stream.header->compressionType == ZEL_COMPRESSION_LZ4) {
+    if (stream.header.compressionType == ZEL_COMPRESSION_LZ4) {
         scratch = zelAcquireZoneScratch(ctx, stream.layout.zonePixelBytes);
         if (!scratch)
             return ZEL_ERR_OUT_OF_MEMORY;
@@ -931,7 +1112,7 @@ ZELResult zelDecodeFrameRgb565Zone(const ZELContext *ctx,
         return ZEL_ERR_OUT_OF_BOUNDS;
 
     uint8_t *scratch = NULL;
-    if (stream.header->compressionType == ZEL_COMPRESSION_LZ4) {
+    if (stream.header.compressionType == ZEL_COMPRESSION_LZ4) {
         scratch = zelAcquireZoneScratch(ctx, stream.layout.zonePixelBytes);
         if (!scratch)
             return ZEL_ERR_OUT_OF_MEMORY;

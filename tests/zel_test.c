@@ -10,6 +10,23 @@ static uint16_t swap_u16(uint16_t v) {
     return (uint16_t)(((v & 0x00FFu) << 8) | ((v & 0xFF00u) >> 8));
 }
 
+typedef struct {
+    const uint8_t *data;
+    size_t size;
+} TestMemoryStream;
+
+static size_t test_memory_stream_read(void *userData, size_t offset, void *dst, size_t size) {
+    TestMemoryStream *stream = (TestMemoryStream *)userData;
+    if (!stream || !dst)
+        return 0;
+    if (offset > stream->size)
+        return 0;
+    if (size > stream->size - offset)
+        return 0;
+    memcpy(dst, stream->data + offset, size);
+    return size;
+}
+
 static const uint8_t kSimpleFramePattern[8] = {0, 1, 0, 1, 1, 0, 1, 0};
 
 static void build_expected_rgb_frame(uint16_t *dst, const uint16_t palette[2]) {
@@ -401,6 +418,34 @@ static void test_palette_and_decode_index8(void) {
     free(data);
 }
 
+static void test_stream_decode_index8(void) {
+    size_t size = 0;
+    uint8_t *data = buildSimpleZelSingleFrame(&size);
+
+    TestMemoryStream memStream = {data, size};
+    ZELInputStream stream;
+    stream.read = test_memory_stream_read;
+    stream.close = NULL;
+    stream.userData = &memStream;
+    stream.size = size;
+
+    ZELResult res = ZEL_OK;
+    ZELContext *ctx = zelOpenStream(&stream, &res);
+    assert(ctx && res == ZEL_OK);
+
+    uint8_t buf[8];
+    memset(buf, 0xEF, sizeof(buf));
+
+    res = zelDecodeFrameIndex8(ctx, 0, buf, 4);
+    assert(res == ZEL_OK);
+
+    for (size_t i = 0; i < sizeof(kSimpleFramePattern); ++i)
+        assert(buf[i] == kSimpleFramePattern[i]);
+
+    zelClose(ctx);
+    free(data);
+}
+
 static void test_decode_rgb565(void) {
     size_t size = 0;
     uint8_t *data = buildSimpleZelSingleFrame(&size);
@@ -743,6 +788,7 @@ static void test_timeline_helpers_binary(void) {
 int main(void) {
     test_open_and_basic_getters();
     test_palette_and_decode_index8();
+    test_stream_decode_index8();
     test_decode_rgb565();
     test_palette_endianness_controls();
     test_zone_decoders();
