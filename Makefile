@@ -99,9 +99,13 @@ msvc:
 amalgamate: $(AMALG)
 single: $(AMALG)
 
+HASH := \#
+
 $(AMALG): $(AMALG_PARTS) $(AMALG_HEADERS) | dirs
 	@$(MKDIR_P) $(dir $@)
 	@printf "/* Auto-generated single-file amalgamation. Do not edit directly. */\n" > $@
+	@printf "$(HASH)define LZ4_STATIC_LINKING_ONLY\n" >> $@
+	@printf "$(HASH)define LZ4_DISABLE_DEPRECATE_WARNINGS\n" >> $@
 	@printf "/* Source files: $(AMALG_PARTS) */\n" >> $@
 	@printf "/* Internal header */\n" >> $@
 	@cat src/zel_internal.h >> $@
